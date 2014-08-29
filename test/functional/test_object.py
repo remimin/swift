@@ -552,6 +552,15 @@ class TestObject(unittest.TestCase):
         self.assertEquals(resp.status, 200)
         self.assertEquals(body, 'test')
 
+        # can get an object using concurrent reads
+        if tf.in_process:
+            tf.app.concurrent_reads = True
+            resp = retry(get, self.obj, use_account=3)
+            body = resp.read()
+            self.assertEquals(resp.status, 200)
+            self.assertEquals(body, 'test')
+            tf.app.concurrent_reads = False
+
         # can not put an object
         obj_name = str(uuid4())
         resp = retry(put, obj_name, use_account=3)

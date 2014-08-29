@@ -225,6 +225,19 @@ class TestAccount(Base):
 
             self.assertEqual(a, b)
 
+        # Now test again using concurrent reads, if we have access to the
+        # proxy server (in-process servers)
+        if tf.in_process:
+            tf.app.concurrent_reads = True
+            for format_type in [None, 'json', 'xml']:
+                b = self.env.account.containers(parms={'format': format_type})
+
+                if isinstance(b[0], dict):
+                    b = [x['name'] for x in b]
+
+                self.assertEqual(a, b)
+            tf.app.concurrent_reads = False
+
     def testInvalidAuthToken(self):
         hdrs = {'X-Auth-Token': 'bogus_auth_token'}
         self.assertRaises(ResponseError, self.env.account.info, hdrs=hdrs)
@@ -547,6 +560,23 @@ class TestContainer(Base):
             for file_item in files:
                 self.assert_(file_item in self.env.files)
 
+        # Test container file list again this time using concurrent reads, if
+        # we have access to the proxy (in-process servers)
+        if tf.in_process:
+            tf.app.concurrent_reads = True
+            for format_type in [None, 'json', 'xml']:
+                files = self.env.container.files(parms={'format': format_type})
+                self.assert_status(200)
+                if isinstance(files[0], dict):
+                    files = [x['name'] for x in files]
+
+                for file_item in self.env.files:
+                    self.assert_(file_item in files)
+
+                for file_item in files:
+                    self.assert_(file_item in self.env.files)
+            tf.app.concurrent_reads = False
+
     def testMarkerLimitFileList(self):
         for format_type in [None, 'json', 'xml']:
             for marker in ['0', 'A', 'I', 'R', 'Z', 'a', 'i', 'r', 'z',
@@ -831,6 +861,18 @@ class TestFileDev(Base):
 
 class TestFileDevUTF8(Base2, TestFileDev):
     set_up = False
+
+
+class TestFileDevConcurrentRead(TestFileDev):
+    set_up = False
+
+    def setUp(self):
+        super(TestFileDevConcurrentRead, self).setUp()
+        if tf.in_process is False:
+            raise SkipTest("in_process servers must be used for "
+                           "concurrent read tests")
+
+        tf.app.concurrent_reads = True
 
 
 class TestFile(Base):
@@ -1735,6 +1777,18 @@ class TestFileUTF8(Base2, TestFile):
     set_up = False
 
 
+class TestFileConcurrentRead(TestFile):
+    set_up = False
+
+    def setUp(self):
+        super(TestFileConcurrentRead, self).setUp()
+        if tf.in_process is False:
+            raise SkipTest("in_process servers must be used for "
+                           "concurrent read tests")
+
+        tf.app.concurrent_reads = True
+
+
 class TestDloEnv(object):
     @classmethod
     def setUp(cls):
@@ -1932,6 +1986,18 @@ class TestDloUTF8(Base2, TestDlo):
     set_up = False
 
 
+class TestDloConcurrentRead(TestDlo):
+    set_up = False
+
+    def setUp(self):
+        super(TestDloConcurrentRead, self).setUp()
+        if tf.in_process is False:
+            raise SkipTest("in_process servers must be used for "
+                           "concurrent read tests")
+
+        tf.app.concurrent_reads = True
+
+
 class TestFileComparisonEnv(object):
     @classmethod
     def setUp(cls):
@@ -2051,6 +2117,18 @@ class TestFileComparison(Base):
 
 class TestFileComparisonUTF8(Base2, TestFileComparison):
     set_up = False
+
+
+class TestFileComparisonConcurrentRead(TestFileComparison):
+    set_up = False
+
+    def setUp(self):
+        super(TestFileComparisonConcurrentRead, self).setUp()
+        if tf.in_process is False:
+            raise SkipTest("in_process servers must be used for "
+                           "concurrent read tests")
+
+        tf.app.concurrent_reads = True
 
 
 class TestSloEnv(object):
@@ -2386,6 +2464,18 @@ class TestSloUTF8(Base2, TestSlo):
     set_up = False
 
 
+class TestSloConcurrentRead(TestSlo):
+    set_up = False
+
+    def setUp(self):
+        super(TestSloConcurrentRead, self).setUp()
+        if tf.in_process is False:
+            raise SkipTest("in_process servers must be used for "
+                           "concurrent read tests")
+
+        tf.app.concurrent_reads = True
+
+
 class TestObjectVersioningEnv(object):
     versioning_enabled = None  # tri-state: None initially, then True/False
 
@@ -2518,6 +2608,18 @@ class TestObjectVersioning(Base):
 
 class TestObjectVersioningUTF8(Base2, TestObjectVersioning):
     set_up = False
+
+
+class TestObjectVersioningConcurrentRead(TestObjectVersioning):
+    set_up = False
+
+    def setUp(self):
+        super(TestObjectVersioningConcurrentRead, self).setUp()
+        if tf.in_process is False:
+            raise SkipTest("in_process servers must be used for "
+                           "concurrent read tests")
+
+        tf.app.concurrent_reads = True
 
 
 class TestCrossPolicyObjectVersioning(TestObjectVersioning):
@@ -2708,6 +2810,18 @@ class TestTempurlUTF8(Base2, TestTempurl):
     set_up = False
 
 
+class TestTempurlConcurrentRead(TestTempurl):
+    set_up = False
+
+    def setUp(self):
+        super(TestTempurlConcurrentRead, self).setUp()
+        if tf.in_process is False:
+            raise SkipTest("in_process servers must be used for "
+                           "concurrent read tests")
+
+        tf.app.concurrent_reads = True
+
+
 class TestSloTempurlEnv(object):
     enabled = None  # tri-state: None initially, then True/False
 
@@ -2793,6 +2907,18 @@ class TestSloTempurl(Base):
 
 class TestSloTempurlUTF8(Base2, TestSloTempurl):
     set_up = False
+
+
+class TestSloTempurlConcurrentRead(TestSloTempurl):
+    set_up = False
+
+    def setUp(self):
+        super(TestSloTempurlConcurrentRead, self).setUp()
+        if tf.in_process is False:
+            raise SkipTest("in_process servers must be used for "
+                           "concurrent read tests")
+
+        tf.app.concurrent_reads = True
 
 
 if __name__ == '__main__':

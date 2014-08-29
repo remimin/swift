@@ -78,6 +78,7 @@ if StrictVersion(client_version) >= StrictVersion('2.0'):
 config = {}
 web_front_end = None
 normalized_urls = None
+app = None
 
 # If no config was read, we will fall back to old school env vars
 swift_test_auth_version = None
@@ -277,6 +278,7 @@ def in_process_setup(the_object_server=object_server):
     def get_logger(name, *args, **kwargs):
         return logger
 
+    global app
     with mock.patch('swift.common.utils.get_logger', get_logger):
         with mock.patch('swift.common.middleware.memcache.MemcacheMiddleware',
                         FakeMemcacheMiddleware):

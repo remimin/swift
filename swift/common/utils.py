@@ -2086,6 +2086,10 @@ class GreenAsyncPile(object):
         finally:
             self._inflight -= 1
 
+    @property
+    def inflight(self):
+        return self._inflight
+
     def spawn(self, func, *args, **kwargs):
         """
         Spawn a job in a green thread on the pile.

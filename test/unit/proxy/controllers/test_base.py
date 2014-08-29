@@ -189,6 +189,40 @@ class TestFuncs(unittest.TestCase):
         self.assertTrue('swift.account/a' in resp.environ)
         self.assertEqual(resp.environ['swift.account/a']['status'], 200)
 
+        # Run the above tests again, but this time with concurrent_reads
+        # turned on
+        self.app.concurrent_reads = True
+        req = Request.blank('/v1/a/c/o/with/slashes')
+        with patch('swift.proxy.controllers.base.'
+                   'http_connect', fake_http_connect(200)):
+            resp = base.GETorHEAD_base(req, 'object', FakeRing(), 'part',
+                                       '/a/c/o/with/slashes')
+        self.assertTrue('swift.object/a/c/o/with/slashes' in resp.environ)
+        self.assertEqual(
+            resp.environ['swift.object/a/c/o/with/slashes']['status'], 200)
+        req = Request.blank('/v1/a/c/o')
+        with patch('swift.proxy.controllers.base.'
+                   'http_connect', fake_http_connect(200)):
+            resp = base.GETorHEAD_base(req, 'object', FakeRing(), 'part',
+                                       '/a/c/o')
+        self.assertTrue('swift.object/a/c/o' in resp.environ)
+        self.assertEqual(resp.environ['swift.object/a/c/o']['status'], 200)
+        req = Request.blank('/v1/a/c')
+        with patch('swift.proxy.controllers.base.'
+                   'http_connect', fake_http_connect(200)):
+            resp = base.GETorHEAD_base(req, 'container', FakeRing(), 'part',
+                                       '/a/c')
+        self.assertTrue('swift.container/a/c' in resp.environ)
+        self.assertEqual(resp.environ['swift.container/a/c']['status'], 200)
+
+        req = Request.blank('/v1/a')
+        with patch('swift.proxy.controllers.base.'
+                   'http_connect', fake_http_connect(200)):
+            resp = base.GETorHEAD_base(req, 'account', FakeRing(), 'part',
+                                       '/a')
+        self.assertTrue('swift.account/a' in resp.environ)
+        self.assertEqual(resp.environ['swift.account/a']['status'], 200)
+
     def test_get_info(self):
         app = FakeApp()
         # Do a non cached call to account
