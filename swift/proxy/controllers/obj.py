@@ -1188,51 +1188,6 @@ class BaseObjectController(Controller):
         partition, nodes = obj_ring.get_nodes(
             self.account_name, self.container_name, self.object_name)
 
-        # do a HEAD request for checking object versions
-        if object_versions and not req.environ.get('swift_versioned_copy'):
-            # make sure proxy-server uses the right policy index
-            _headers = {'X-Backend-Storage-Policy-Index': policy_index,
-                        'X-Newest': 'True'}
-            hreq = Request.blank(req.path_info, headers=_headers,
-                                 environ={'REQUEST_METHOD': 'HEAD'})
-            hnode_iter = self.app.iter_nodes(obj_ring, partition)
-            hresp = self.GETorHEAD_base(
-                hreq, _('Object'), hnode_iter, partition,
-                hreq.swift_entity_path)
-
-        if object_versions and not req.environ.get('swift_versioned_copy'):
-            is_manifest = 'X-Object-Manifest' in req.headers or \
-                          'X-Object-Manifest' in hresp.headers
-            if hresp.status_int != HTTP_NOT_FOUND and not is_manifest:
-                # This is a version manifest and needs to be handled
-                # differently. First copy the existing data to a new object,
-                # then write the data from this request to the version manifest
-                # object.
-                lcontainer = object_versions.split('/')[0]
-                prefix_len = '%03x' % len(self.object_name)
-                lprefix = prefix_len + self.object_name + '/'
-                ts_source = hresp.environ.get('swift_x_timestamp')
-                if ts_source is None:
-                    ts_source = time.mktime(time.strptime(
-                                            hresp.headers['last-modified'],
-                                            '%a, %d %b %Y %H:%M:%S GMT'))
-                new_ts = Timestamp(ts_source).internal
-                vers_obj_name = lprefix + new_ts
-                copy_headers = {
-                    'Destination': '%s/%s' % (lcontainer, vers_obj_name)}
-                copy_environ = {'REQUEST_METHOD': 'COPY',
-                                'swift_versioned_copy': True
-                                }
-                copy_req = Request.blank(req.path_info, headers=copy_headers,
-                                         environ=copy_environ)
-                copy_resp = self.COPY(copy_req)
-                if is_client_error(copy_resp.status_int):
-                    # missing container or bad permissions
-                    return HTTPPreconditionFailed(request=req)
-                elif not is_success(copy_resp.status_int):
-                    # could not copy the data, bail
-                    return HTTPServiceUnavailable(request=req)
-
         source_header = req.headers.get('X-Copy-From')
         source_resp = None
         if source_header:
@@ -1282,78 +1237,6 @@ class BaseObjectController(Controller):
         containers = container_info['nodes']
         req.acl = container_info['write_acl']
         req.environ['swift_sync_key'] = container_info['sync_key']
-        object_versions = container_info['versions']
-        if object_versions:
-            # this is a version manifest and needs to be handled differently
-            object_versions = unquote(object_versions)
-            lcontainer = object_versions.split('/')[0]
-            prefix_len = '%03x' % len(self.object_name)
-            lprefix = prefix_len + self.object_name + '/'
-            item_list = []
-            try:
-                for _item in self._listing_iter(lcontainer, lprefix,
-                                                req.environ):
-                    item_list.append(_item)
-            except ListingIterNotFound:
-                # no worries, last_item is None
-                pass
-            except ListingIterNotAuthorized as err:
-                return err.aresp
-            except ListingIterError:
-                return HTTPServerError(request=req)
-
-            while len(item_list) > 0:
-                previous_version = item_list.pop()
-                # there are older versions so copy the previous version to the
-                # current object and delete the previous version
-                orig_container = self.container_name
-                orig_obj = self.object_name
-                self.container_name = lcontainer
-                self.object_name = previous_version['name'].encode('utf-8')
-
-                copy_path = '/v1/' + self.account_name + '/' + \
-                            self.container_name + '/' + self.object_name
-
-                copy_headers = {'X-Newest': 'True',
-                                'Destination': orig_container + '/' + orig_obj
-                                }
-                copy_environ = {'REQUEST_METHOD': 'COPY',
-                                'swift_versioned_copy': True
-                                }
-                creq = Request.blank(copy_path, headers=copy_headers,
-                                     environ=copy_environ)
-                copy_resp = self.COPY(creq)
-                if copy_resp.status_int == HTTP_NOT_FOUND:
-                    # the version isn't there so we'll try with previous
-                    self.container_name = orig_container
-                    self.object_name = orig_obj
-                    continue
-                if is_client_error(copy_resp.status_int):
-                    # some user error, maybe permissions
-                    return HTTPPreconditionFailed(request=req)
-                elif not is_success(copy_resp.status_int):
-                    # could not copy the data, bail
-                    return HTTPServiceUnavailable(request=req)
-                # reset these because the COPY changed them
-                self.container_name = lcontainer
-                self.object_name = previous_version['name'].encode('utf-8')
-                new_del_req = Request.blank(copy_path, environ=req.environ)
-                container_info = self.container_info(
-                    self.account_name, self.container_name, req)
-                policy_idx = container_info['storage_policy']
-                obj_ring = self.app.get_object_ring(policy_idx)
-                # pass the policy index to storage nodes via req header
-                new_del_req.headers['X-Backend-Storage-Policy-Index'] = \
-                    policy_idx
-                container_partition = container_info['partition']
-                containers = container_info['nodes']
-                new_del_req.acl = container_info['write_acl']
-                new_del_req.path_info = copy_path
-                req = new_del_req
-                # remove 'X-If-Delete-At', since it is not for the older copy
-                if 'X-If-Delete-At' in req.headers:
-                    del req.headers['X-If-Delete-At']
-                break
         if 'swift.authorize' in req.environ:
             aresp = req.environ['swift.authorize'](req)
             if aresp:
