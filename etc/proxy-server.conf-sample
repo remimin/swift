@@ -151,14 +151,12 @@ use = egg:swift#proxy
 # put_queue_depth = 10
 #
 # Storage nodes can be chosen at random (shuffle), by using timing
-# measurements (timing), by using an explicit match (affinity) or can be
-# attempted to be hit at the same time (concurrent).
+# measurements (timing), by using an explicit match (affinity), or by accessing
+# all primary nodes simultaneously (concurrent).
 # Using timing measurements may allow for lower overall latency, while
 # using affinity allows for finer control. In both the timing and
 # affinity cases, equally-sorting nodes are still randomly chosen to
 # spread load.
-# Using concurrent, a request will be sent to all the primary nodes at the same
-# time and will use the storage node that responds first.
 # The valid values for sorting_method are "affinity", "shuffle", "timing", or
 # "concurrent".
 # sorting_method = shuffle
@@ -166,6 +164,11 @@ use = egg:swift#proxy
 # If the "timing" sorting_method is used, the timings will only be valid for
 # the number of seconds configured by timing_expiry.
 # timing_expiry = 300
+#
+# If the "concurrent" sorting_method is used, you can adjust the time between
+# requests in concurrency_timeout, which defaults to 0. This value should be
+# between 0 and node_timeout.
+# concurrency_timeout = 0
 #
 # The maximum time (seconds) that a large object connection is allowed to last.
 # max_large_object_get_time = 86400

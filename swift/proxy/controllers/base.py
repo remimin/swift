@@ -828,8 +828,10 @@ class GetOrHeadHandler(object):
             node_timeout = self.app.recoverable_node_timeout
 
         concurrent_reads = self.app.concurrent_reads
+        concurrency_timeout = self.app.concurrency_timeout
         pile = GreenAsyncPile(len(start_nodes))
-        wait_timeout = 0 if concurrent_reads else node_timeout
+        wait_timeout = concurrency_timeout if concurrent_reads \
+            else node_timeout
 
         for node in nodes:
             pile.spawn(self._make_node_request, node, node_timeout)

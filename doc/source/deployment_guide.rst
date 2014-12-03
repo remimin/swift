@@ -954,6 +954,28 @@ swift_owner_headers           <see the sample  These are the headers whose
                               headers>         up to the auth system in use,
                                                but usually indicates
                                                administrative responsibilities.
+sorting_method                shuffle          Storage nodes can be chosen at
+                                               random (shuffle), by using timing
+                                               measurements (timing), by using an
+                                               explicit match (affinity), or by
+                                               accessing all primary nodes
+                                               simultaneously (concurrent).
+                                               Using timing measurements may allow
+                                               for lower overall latency, while
+                                               using affinity allows for finer
+                                               control. In both the timing and
+                                               affinity cases, equally-sorting nodes
+                                               are still randomly chosen to spread
+                                               load.
+timing_expiry                 300              If the "timing" sorting_method is
+                                               used, the timings will only be valid
+                                               for the number of seconds configured
+                                               by timing_expiry.
+concurrency_timeout           0                If the "concurrent" sorting_method is
+                                               used, you can adjust the time between
+                                               requests in concurrency_timeout. This
+                                               value should be between 0 and
+                                               node_timeout.
 ============================  ===============  =============================
 
 [tempauth]
