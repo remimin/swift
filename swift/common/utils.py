@@ -21,6 +21,7 @@ import errno
 import fcntl
 import grp
 import hmac
+import math
 import operator
 import os
 import pwd
@@ -3277,3 +3278,75 @@ def system_has_splice():
         return True
     except AttributeError:
         return False
+
+
+class Bitmap(object):
+    bitmap = []
+
+    def __init__(self, power=2, bitmap=None):
+        self.power = power
+        if bitmap:
+            if not Bitmap.valid_bitmap(bitmap):
+                raise Exception('Bitmap error')
+            if isinstance(bitmap, str):
+                bitmap = list(bitmap)
+        else:
+            l = int(math.ceil(math.pow(2, power) / 4))
+            bitmap = ["0"] * l
+        self.bitmap = bitmap
+
+    @staticmethod
+    def valid_bitmap(bitmap):
+        if isinstance(bitmap, list):
+            bitmap = ''.join(bitmap)
+        res = re.match('^[0-9a-fA-F]*$', bitmap)
+        if res:
+            return True
+        return False
+
+    def set_power(self, power):
+        self.power = power
+        l = int(math.ceil(math.pow(2, power) / 4))
+        if l > len(self.bitmap):
+            diff = l - len(self.bitmap)
+            self.bitmap += (["0"] * diff)
+        elif l < len(self.bitmap):
+            # Need  to see if it can be reduced (only 0's).
+            pass
+
+    def set_bit(self, shard):
+        # find the bit to change in the bitmap, start with finding
+        # the Hex digit
+        h = shard / 4
+        o = int(math.pow(2, 3 - (shard % 4)))
+        h_val = int(self.bitmap[h], base=16)
+        self.bitmap[h] = hex(h_val | o).replace('0x', '')
+
+    def unset_bit(self, shard):
+        # find the bit to change in the bitmap, start with finding
+        # the Hex digit
+        h = shard / 4
+        # need to use the inverse and then '&' it to 0 the shard bit.
+        o = int((math.pow(2, 4) - 1) - math.pow(2, 3 - (shard % 4)))
+        h_val = int(self.bitmap[h], base=16)
+        self.bitmap[h] = hex(h_val & o).replace('0x', '')
+
+    def is_bit_set(self, shard):
+        h = shard / 4
+        o = int(math.pow(2, 3 - (shard % 4)))
+        h_val = int(self.bitmap[h], base=16)
+        if h_val & o > 0:
+            return True
+        return False
+
+    def __str__(self):
+        return ''.join(self.bitmap) or ''
+
+    def iter(self):
+        for i, item in enumerate(self.bitmap):
+            h_val = int(item, base=16)
+            for o in range(4):
+                offset = int(math.pow(2, 3 - o))
+                if h_val & offset > 0:
+                    res = 4 * i + o
+                    yield res
