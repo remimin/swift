@@ -116,3 +116,8 @@ default = yes
 # of a container name
 
 #max_container_name_length = 256
+
+# max_obj_per_shard is the average number of objects in a container shard
+# before swift will increase of decrease the shard power.
+
+#max_obj_per_shard = 500

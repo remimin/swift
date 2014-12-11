@@ -26,6 +26,7 @@ import operator
 import os
 import pwd
 import re
+import struct
 import sys
 import threading as stdlib_threading
 import time
@@ -3280,6 +3281,42 @@ def system_has_splice():
         return False
 
 
+def is_container_sharded(container_info):
+    shard_power = container_info.get('sysmeta', {}).get('shard_power')
+    return shard_power is not None
+
+
+def generate_shard_container_name(shard, container):
+    if shard == 0:
+        return container
+
+    cont_dict = dict(root_container=container, shard=shard)
+    return '%(root_container)s_shard_%(shard)d' % cont_dict
+
+
+def generate_shard_path(shard_power, account, container, obj=None, shard=None):
+    """
+
+
+    :param shard_power:
+    :param account:
+    :param container:
+    :param obj:
+    :param shard: If specified, use the given shard rather then generating one.
+    :return: tuple (shard, shardpath)
+    """
+    if shard is None and shard_power > 0:
+        # Generate shard
+        bit_shift = 32 - int(shard_power)
+        key = hash_path(account, container, obj, raw_digest=True)
+        shard = struct.unpack_from('>I', key)[0] >> bit_shift
+
+    path = [account, generate_shard_container_name(shard, container)]
+    if obj:
+        path.append(obj)
+    return shard, '/'.join(path)
+
+
 class Bitmap(object):
     bitmap = []
 
@@ -3304,15 +3341,19 @@ class Bitmap(object):
             return True
         return False
 
-    def set_power(self, power):
+    def set_power(self, power, shrink=False):
         self.power = power
         l = int(math.ceil(math.pow(2, power) / 4))
         if l > len(self.bitmap):
             diff = l - len(self.bitmap)
             self.bitmap += (["0"] * diff)
         elif l < len(self.bitmap):
-            # Need  to see if it can be reduced (only 0's).
-            pass
+            if shrink:
+                # Need  to see if it can be reduced (only 0's).
+                diff = len(self.bitmap) - l
+                _empty_diff = ['0'] * diff
+                if self.bitmap[-l:] == _empty_diff:
+                    self.bitmap = self.bitmap[:-l]
 
     def set_bit(self, shard):
         # find the bit to change in the bitmap, start with finding
@@ -3341,6 +3382,9 @@ class Bitmap(object):
 
     def __str__(self):
         return ''.join(self.bitmap) or ''
+
+    def __iter__(self):
+        return self.iter()
 
     def iter(self):
         for i, item in enumerate(self.bitmap):

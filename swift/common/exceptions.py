@@ -153,6 +153,9 @@ class SegmentError(SwiftException):
     pass
 
 
+class ShardException(SwiftException):
+    pass
+
 class ReplicationException(Exception):
     pass
 

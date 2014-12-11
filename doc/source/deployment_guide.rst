@@ -324,6 +324,9 @@ max_header_size      8192        max_header_size is the max number of bytes in
                                  See also include_service_catalog in
                                  proxy-server.conf-sample (documented in
                                  overview_auth.rst)
+max_obj_per_shard    500         max_objects_per_shard is the average number
+                                 of objects in a container shard before swift
+                                 will increase of decrease the shard power.
 ===================  ==========  =============================================
 
 ---------------------------

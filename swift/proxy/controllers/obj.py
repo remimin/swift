@@ -38,11 +38,13 @@ from eventlet.timeout import Timeout
 from swift.common.utils import (
     clean_content_type, config_true_value, ContextPool, csv_append,
     GreenAsyncPile, GreenthreadSafeIterator, json, Timestamp,
-    normalize_delete_at_timestamp, public, quorum_size, get_expirer_container)
+    normalize_delete_at_timestamp, public, quorum_size, get_expirer_container,
+    generate_shard_path, is_container_sharded, Bitmap,
+    generate_shard_container_name)
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_metadata, check_object_creation, \
     check_copy_from_header, check_destination_header, \
-    check_account_format
+    check_account_format, MAX_OBJECTS_PER_SHARD
 from swift.common import constraints
 from swift.common.exceptions import ChunkReadTimeout, \
     ChunkWriteTimeout, ConnectionTimeout, ListingIterNotFound, \
@@ -206,11 +208,18 @@ class ObjectController(Controller):
             aresp = req.environ['swift.authorize'](req)
             if aresp:
                 return aresp
-        partition = obj_ring.get_part(
-            self.account_name, self.container_name, self.object_name)
-        resp = self.GETorHEAD_base(
-            req, _('Object'), obj_ring, partition,
-            req.swift_entity_path)
+
+        if is_container_sharded(container_info):
+            shard_power = json.loads(
+                    container_info['sysmeta'].get('shard_power'))
+            resp = self.make_shard_requests(req, obj_ring, req.method,
+                                            shard_power)
+        else:
+            partition = obj_ring.get_part(
+                self.account_name, self.container_name, self.object_name)
+            resp = self.GETorHEAD_base(
+                req, _('Object'), obj_ring, partition,
+                req.swift_entity_path)
 
         if ';' in resp.headers.get('content-type', ''):
             resp.content_type = clean_content_type(
@@ -280,6 +289,15 @@ class ObjectController(Controller):
                                            container_info['storage_policy'])
             obj_ring = self.app.get_object_ring(policy_index)
             req.headers['X-Backend-Storage-Policy-Index'] = policy_index
+
+            if is_container_sharded(container_info):
+                shard_power = json.loads(
+                    container_info['sysmeta'].get('shard_power'))
+                resp = self.make_shard_requests(
+                    req, obj_ring, 'POST', shard_power, delete_at_container,
+                    delete_at_part, delete_at_nodes)
+                return resp
+
             partition, nodes = obj_ring.get_nodes(
                 self.account_name, self.container_name, self.object_name)
 
@@ -292,6 +310,39 @@ class ObjectController(Controller):
             resp = self.make_requests(req, obj_ring, partition,
                                       'POST', req.swift_entity_path, headers)
             return resp
+
+    def make_shard_requests(self, req, ring, method, shard_power,
+                            delete_at_container=None, delete_at_part=None,
+                            delete_at_nodes=None, overrides=None):
+
+        resp = None
+        for power in reversed(shard_power):
+            shard, path = generate_shard_path(
+                power, self.account_name, self.container_name, self.object_name)
+
+            cont_name = generate_shard_container_name(shard,
+                                                      self.container_name)
+            partition, nodes = ring.get_nodes(
+                self.account_name, cont_name, self.object_name)
+
+            req.headers['X-Timestamp'] = Timestamp(time.time()).internal
+
+            if method in ('GET', 'HEAD'):
+                resp = self.GETorHEAD_base(
+                    req, _('Object'), ring, partition,
+                    path)
+            else:
+                headers = self._backend_requests(
+                    req, len(nodes), partition, nodes,
+                    delete_at_container, delete_at_part, delete_at_nodes)
+
+                resp = self.make_requests(req, ring, partition,
+                                          method, path,
+                                          headers, overrides=overrides)
+            if resp.is_success():
+                break
+
+        return resp
 
     def _backend_requests(self, req, n_outgoing,
                           container_partition, containers,
@@ -456,6 +507,100 @@ class ObjectController(Controller):
 
         return req, delete_at_container, delete_at_part, delete_at_nodes
 
+    def _create_modify_container(self, req, account, container,
+                                 extra_headers={}, method='PUT'):
+        """
+        Create or modify a container.
+
+        :param req: the request passed object to base it off
+        :param account: the unquoted account name
+        :param container: the unquoted container name
+        :param method: method to use, default PUT (create)
+        """
+        partition, nodes = self.app.container_ring.get_nodes(account, container)
+        path = '/%s/%s' % (account, container)
+        headers = {'X-Timestamp': Timestamp(time.time()).internal,
+                   'X-Trans-Id': self.trans_id,
+                   'Connection': 'close'}
+        # transfer any x-container-sysmeta headers from original request
+        # to the container PUT
+        headers.update((k, v)
+                       for k, v in itertools.chain(req.headers.iteritems(),
+                                                   extra_headers.iteritems())
+                       if is_sys_meta('container', k))
+        resp = self.make_requests(Request.blank('/v1' + path),
+                                  self.app.container_ring, partition, method,
+                                  path, [headers] * len(nodes))
+        if is_success(resp.status_int):
+            self.app.logger.info('created shard container %r' % path)
+        else:
+            self.app.logger.warning("Couldn't create shard container %r" % path)
+
+    def _PUT_sharded(self, req, container_info):
+        if not is_container_sharded(container_info):
+            return None
+
+        num_objects = int(container_info.get('object_count'))
+        objs_per_shard = int(container_info.get('meta').get(
+            'max_shard_objects', MAX_OBJECTS_PER_SHARD))
+        shard_power = json.loads(
+            container_info['sysmeta'].get('shard_power'))
+        bitmap = Bitmap(
+            bitmap=container_info['sysmeta'].get('shard_bitmap'))
+
+        if shard_power[-1] > 0:
+            # check to see if swift needs to up the shard_power on this
+            # container. If the shard_power is 0, then it's turned off (returns
+            # the root container). Metadata will be cleaned up by the
+            # reconciler.
+            current_avg = num_objects / 2**shard_power[-1]
+            if current_avg > objs_per_shard:
+                # time to increase the shard_power
+                shard_power.append(shard_power[-1] + 1)
+                extra_headers = {
+                    'x-container-sysmeta-shard-power': json.dumps(shard_power),
+                }
+                if not self._create_modify_container(req, self.account_name,
+                                                    self.container_name,
+                                                    extra_headers,
+                                                    method='POST'):
+                    return HTTPServerError('Failed to update shard power')
+
+        shard, shard_path = generate_shard_path(
+            shard_power[-1], self.account_name, self.container_name,
+            self.object_name)
+
+        cont_name = generate_shard_container_name(shard,
+                                                  self.container_name)
+        req.path_info = shard_path
+
+        if not bitmap.is_bit_set(shard):
+            # Shard container needs to be created.
+            extra_headers = {
+                'x-container-sysmeta-shard-container':
+                    '%s/%s' % (self.account_name, self.container_name),
+            }
+            if self._create_modify_container(req, self.account_name,
+                                             cont_name, extra_headers):
+                bitmap.set_bit(shard)
+                extra_headers = {
+                    'x-container-sysmeta-shard-bitmap': str(bitmap),
+                }
+                if not self._create_modify_container(req, self.account_name,
+                                                    cont_name,
+                                                    extra_headers,
+                                                    method='POST'):
+                    return HTTPServerError('Failed to update shard bitmap')
+            else:
+                return HTTPServerError('Failed to create shard container'
+                                       '%s' % cont_name)
+
+        self.container_name = generate_shard_container_name(
+            shard, self.container_name)
+        req.path_info = shard_path
+
+        return None
+
     @public
     @cors_validation
     @delay_denial
@@ -501,6 +646,10 @@ class ObjectController(Controller):
 
         error_response = check_object_creation(req, self.object_name) or \
             check_content_type(req)
+        if error_response:
+            return error_response
+
+        error_response = self._PUT_sharded(req, container_info)
         if error_response:
             return error_response
 
@@ -877,8 +1026,17 @@ class ObjectController(Controller):
 
         headers = self._backend_requests(
             req, len(nodes), container_partition, containers)
+
         # When deleting objects treat a 404 status as 204.
         status_overrides = {404: 204}
+
+        if is_container_sharded(container_info):
+            shard_power = json.loads(
+                    container_info['sysmeta'].get('shard_power'))
+            resp = self.make_shard_requests(req, obj_ring, 'DELETE',
+                                            shard_power,
+                                            overrides=status_overrides)
+            return resp
         resp = self.make_requests(req, obj_ring,
                                   partition, 'DELETE', req.swift_entity_path,
                                   headers, overrides=status_overrides)

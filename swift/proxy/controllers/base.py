@@ -39,7 +39,7 @@ from eventlet.timeout import Timeout
 from swift.common.wsgi import make_pre_authed_env
 from swift.common.utils import Timestamp, config_true_value, \
     public, split_path, list_from_csv, GreenthreadSafeIterator, \
-    quorum_size, GreenAsyncPile
+    quorum_size, GreenAsyncPile, generate_shard_path
 from swift.common.bufferedhttp import http_connect
 from swift.common.exceptions import ChunkReadTimeout, ChunkWriteTimeout, \
     ConnectionTimeout
