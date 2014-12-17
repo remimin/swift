@@ -15,6 +15,7 @@
 
 from swift import gettext_ as _
 from urllib import unquote
+import itertools
 import json
 import math
 import time
@@ -140,13 +141,12 @@ class ContainerController(Controller):
 
     def _enable_sharding(self, req, container_info, shard_power=[0],
                          bitmap=None):
-
-        num_objects = int(container_info.get('object_count', 0))
+        num_objects = container_info.get('object_count', 0)
+        num_objects = int(num_objects) if num_objects else 0
         objs_per_shard = None
         power = 1
         if 'x-container-meta-max-shard-objects' in req.headers:
-            objs_per_shard = \
-                    int(req.headers('x-container-meta-max-shard-objects'))
+            objs_per_shard = req.headers('x-container-meta-max-shard-objects')
 
             try:
                 objs_per_shard = int(objs_per_shard)
@@ -171,30 +171,34 @@ class ContainerController(Controller):
 
         shard_power.append(power)
         bitmap = Bitmap(power) if not bitmap else bitmap.set_power(power)
-        req.headers['x-container-sysmeta-part-power'] = \
+        req.headers['x-container-sysmeta-shard-power'] = \
             json.dumps(shard_power)
         req.headers['x-container-sysmeta-shard-bitmap'] = str(bitmap)
 
         return None
 
     def _GET_sharded(self, req, container_info):
-        bitmap = Bitmap(bitmap=container_info['sysmeta'].get('shard_bitmap',
+        bitmap = Bitmap(bitmap=container_info['sysmeta'].get('shard-bitmap',
                                                              ''))
+        if not req.environ.get('swift.already_sharded'):
+            req.environ['swift.already_sharded'] = True
+
         responses = list()
-        for shard in bitmap:
+        for shard in itertools.chain([None], bitmap):
             # TODO: Need to take markers and limit into account, that is
             #       Search for the object to find out what shard to look for.
             # part power will not be used because we specify the shard number
-            _shard, path = generate_shard_path(0, self.account_name,
+            shard, path = generate_shard_path(0, self.account_name,
                                                self.container_name,
-                                               shard=shard)
+                                               shard=shard,
+                                               version=False)
             part = self.app.container_ring.get_part(
                 self.account_name,
                 generate_shard_container_name(shard, self.container_name))
 
             tmp_resp = self.GETorHEAD_base(
                 req, _('Container'), self.app.container_ring, part, path)
-            if not is_success(tmp_resp.status):
+            if not is_success(tmp_resp.status_int):
                 raise ShardException('Failed to talk to a shard container')
             responses.append(tmp_resp)
 
@@ -210,6 +214,8 @@ class ContainerController(Controller):
                 if not resp_headers:
                     resp_headers = resp.headers.copy()
                     resp_status = resp.status
+                if is_success(resp.status_int) and resp.status_int != 204:
+                    resp_status = resp.status
 
                 bytes_used += \
                     int(resp.headers.get("X-Container-Bytes-Used", 0))
@@ -217,9 +223,18 @@ class ContainerController(Controller):
                     int(resp.headers.get("content-length", 0))
             else:
                 raise HTTPServerError("Failed to talk to container shard")
-            resp_headers["X-Container-Object-Count"] = str(object_count)
             resp_headers["X-Container-Bytes-Used"] = str(bytes_used)
             resp_headers["content-length"] = str(content_length)
+        resp_headers["X-Container-Object-Count"] = str(object_count)
+
+        shard_power = json.loads(container_info['sysmeta'].get('shard-power'))
+        if shard_power[-1] != 0:
+            resp_headers['X-Container-Sharding'] = 'On'
+
+        # clear the container cache as it gets filled with the info from a shard
+        clear_info_cache(self.app, req.environ, self.account_name,
+                         self.container_name)
+
         return Response(app_iter=resp_bodies, status=resp_status,
                         headers=resp_headers)
 
@@ -238,7 +253,8 @@ class ContainerController(Controller):
             # We are in GET, so we need to check to see if this container has
             # container sharding activated
             info = self.container_info(self.account_name, self.container_name)
-            if is_container_sharded(info):
+            if is_container_sharded(info) and \
+                    not req.environ.get('swift.already_sharded'):
                 # container is sharded
                 resp = self._GET_sharded(req, info)
             else:

@@ -211,7 +211,7 @@ class ObjectController(Controller):
 
         if is_container_sharded(container_info):
             shard_power = json.loads(
-                    container_info['sysmeta'].get('shard_power'))
+                    container_info['sysmeta'].get('shard-power'))
             resp = self.make_shard_requests(req, obj_ring, req.method,
                                             shard_power)
         else:
@@ -318,7 +318,8 @@ class ObjectController(Controller):
         resp = None
         for power in reversed(shard_power):
             shard, path = generate_shard_path(
-                power, self.account_name, self.container_name, self.object_name)
+                power, self.account_name, self.container_name, self.object_name,
+                version=False)
 
             cont_name = generate_shard_container_name(shard,
                                                       self.container_name)
@@ -339,7 +340,7 @@ class ObjectController(Controller):
                 resp = self.make_requests(req, ring, partition,
                                           method, path,
                                           headers, overrides=overrides)
-            if resp.is_success():
+            if is_success(resp.status_int):
                 break
 
         return resp
@@ -527,26 +528,29 @@ class ObjectController(Controller):
         headers.update((k, v)
                        for k, v in itertools.chain(req.headers.iteritems(),
                                                    extra_headers.iteritems())
-                       if is_sys_meta('container', k))
+                       if is_sys_meta('container', k) or
+                       k == 'X-Backend-Storage-Policy-Index')
         resp = self.make_requests(Request.blank('/v1' + path),
                                   self.app.container_ring, partition, method,
                                   path, [headers] * len(nodes))
         if is_success(resp.status_int):
             self.app.logger.info('created shard container %r' % path)
+            return True
         else:
             self.app.logger.warning("Couldn't create shard container %r" % path)
+            return False
 
     def _PUT_sharded(self, req, container_info):
         if not is_container_sharded(container_info):
             return None
 
-        num_objects = int(container_info.get('object_count'))
+        num_objects = int(container_info.get('object_count') or 0)
         objs_per_shard = int(container_info.get('meta').get(
             'max_shard_objects', MAX_OBJECTS_PER_SHARD))
         shard_power = json.loads(
-            container_info['sysmeta'].get('shard_power'))
+            container_info['sysmeta'].get('shard-power'))
         bitmap = Bitmap(
-            bitmap=container_info['sysmeta'].get('shard_bitmap'))
+            bitmap=container_info['sysmeta'].get('shard-bitmap'))
 
         if shard_power[-1] > 0:
             # check to see if swift needs to up the shard_power on this
@@ -558,7 +562,7 @@ class ObjectController(Controller):
                 # time to increase the shard_power
                 shard_power.append(shard_power[-1] + 1)
                 extra_headers = {
-                    'x-container-sysmeta-shard-power': json.dumps(shard_power),
+                    'X-Container-Sysmeta-Shard-Power': json.dumps(shard_power),
                 }
                 if not self._create_modify_container(req, self.account_name,
                                                     self.container_name,
@@ -577,17 +581,19 @@ class ObjectController(Controller):
         if not bitmap.is_bit_set(shard):
             # Shard container needs to be created.
             extra_headers = {
-                'x-container-sysmeta-shard-container':
+                'X-Container-Sysmeta-Shard-Container':
                     '%s/%s' % (self.account_name, self.container_name),
+                'X-Backend-Storage-Policy-Index':
+                    container_info['storage_policy'],
             }
             if self._create_modify_container(req, self.account_name,
                                              cont_name, extra_headers):
                 bitmap.set_bit(shard)
                 extra_headers = {
-                    'x-container-sysmeta-shard-bitmap': str(bitmap),
+                    'X-Container-Sysmeta-Shard-Bitmap': str(bitmap),
                 }
                 if not self._create_modify_container(req, self.account_name,
-                                                    cont_name,
+                                                    self.container_name,
                                                     extra_headers,
                                                     method='POST'):
                     return HTTPServerError('Failed to update shard bitmap')
@@ -646,10 +652,6 @@ class ObjectController(Controller):
 
         error_response = check_object_creation(req, self.object_name) or \
             check_content_type(req)
-        if error_response:
-            return error_response
-
-        error_response = self._PUT_sharded(req, container_info)
         if error_response:
             return error_response
 
@@ -715,6 +717,13 @@ class ObjectController(Controller):
                 elif not is_success(copy_resp.status_int):
                     # could not copy the data, bail
                     return HTTPServiceUnavailable(request=req)
+
+        error_response = self._PUT_sharded(req, container_info)
+        if error_response:
+            return error_response
+
+        partition, nodes = obj_ring.get_nodes(
+            self.account_name, self.container_name, self.object_name)
 
         reader = req.environ['wsgi.input'].read
         data_source = iter(lambda: reader(self.app.client_chunk_size), '')
@@ -1032,7 +1041,7 @@ class ObjectController(Controller):
 
         if is_container_sharded(container_info):
             shard_power = json.loads(
-                    container_info['sysmeta'].get('shard_power'))
+                    container_info['sysmeta'].get('shard-power'))
             resp = self.make_shard_requests(req, obj_ring, 'DELETE',
                                             shard_power,
                                             overrides=status_overrides)

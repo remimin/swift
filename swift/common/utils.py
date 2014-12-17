@@ -3282,19 +3282,20 @@ def system_has_splice():
 
 
 def is_container_sharded(container_info):
-    shard_power = container_info.get('sysmeta', {}).get('shard_power')
+    shard_power = container_info.get('sysmeta', {}).get('shard-power')
     return shard_power is not None
 
 
 def generate_shard_container_name(shard, container):
-    if shard == 0:
+    if shard == -1:
         return container
 
     cont_dict = dict(root_container=container, shard=shard)
     return '%(root_container)s_shard_%(shard)d' % cont_dict
 
 
-def generate_shard_path(shard_power, account, container, obj=None, shard=None):
+def generate_shard_path(shard_power, account, container, obj=None, shard=None,
+                        version=True):
     """
 
 
@@ -3311,10 +3312,13 @@ def generate_shard_path(shard_power, account, container, obj=None, shard=None):
         key = hash_path(account, container, obj, raw_digest=True)
         shard = struct.unpack_from('>I', key)[0] >> bit_shift
 
+    if not shard and shard_power == 0:
+        shard = -1
     path = [account, generate_shard_container_name(shard, container)]
     if obj:
         path.append(obj)
-    return shard, '/'.join(path)
+    prefix = '/v1/%s' if version else '/%s'
+    return shard, prefix % '/'.join(path)
 
 
 class Bitmap(object):
