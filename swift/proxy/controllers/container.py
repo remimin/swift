@@ -205,7 +205,7 @@ class ContainerController(Controller):
         resp_status = 500
         resp_headers = None
         resp_bodies = list()
-        object_count = container_info['object_count']
+        object_count = 0
         bytes_used = 0
         content_length = 0
         for resp in responses:
@@ -217,6 +217,8 @@ class ContainerController(Controller):
                 if is_success(resp.status_int) and resp.status_int != 204:
                     resp_status = resp.status
 
+                object_count += \
+                    int(resp.headers.get("X-Container-Object-Count", 0))
                 bytes_used += \
                     int(resp.headers.get("X-Container-Bytes-Used", 0))
                 content_length += \

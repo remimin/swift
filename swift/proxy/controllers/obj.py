@@ -508,6 +508,30 @@ class ObjectController(Controller):
 
         return req, delete_at_container, delete_at_part, delete_at_nodes
 
+    def _get_object_count_in_sharded_container(self, req, container_info):
+        bitmap = Bitmap(bitmap=container_info['sysmeta'].get('shard-bitmap',
+                                                             ''))
+
+        head_req = Request.blank('', req.environ)
+        head_req.method = 'HEAD'
+        num_objects = 0
+        for shard in itertools.chain([None], bitmap):
+            shard, path = generate_shard_path(0, self.account_name,
+                                              self.container_name,
+                                              shard=shard,
+                                              version=False)
+            head_req.path_info = path
+            part = self.app.container_ring.get_part(
+                self.account_name,
+                generate_shard_container_name(shard, self.container_name))
+
+            tmp_resp = self.GETorHEAD_base(
+                head_req, _('Container'), self.app.container_ring, part,
+                path)
+            num_objects += int(tmp_resp.headers.get("X-Container-Object-Count",
+                                                0))
+        return num_objects
+
     def _create_modify_container(self, req, account, container,
                                  extra_headers={}, method='PUT'):
         """
@@ -544,7 +568,8 @@ class ObjectController(Controller):
         if not is_container_sharded(container_info):
             return None
 
-        num_objects = int(container_info.get('object_count') or 0)
+        num_objects = self._get_object_count_in_sharded_container(
+            req, container_info)
         objs_per_shard = int(container_info.get('meta').get(
             'max_shard_objects', MAX_OBJECTS_PER_SHARD))
         shard_power = json.loads(
@@ -557,10 +582,20 @@ class ObjectController(Controller):
             # container. If the shard_power is 0, then it's turned off (returns
             # the root container). Metadata will be cleaned up by the
             # reconciler.
+            update_power = False
             current_avg = num_objects / 2**shard_power[-1]
+            lower_power = shard_power[-1] -1
+            lower_avg = num_objects / 2**(lower_power if lower_power > 0 else 1)
             if current_avg > objs_per_shard:
+                update_power = True
                 # time to increase the shard_power
                 shard_power.append(shard_power[-1] + 1)
+            elif lower_avg < (objs_per_shard / 2):
+                if lower_power > 1:
+                    update_power = True
+                    # time to decrease shard_power
+                    shard_power.append(lower_power)
+            if update_power:
                 extra_headers = {
                     'X-Container-Sysmeta-Shard-Power': json.dumps(shard_power),
                 }

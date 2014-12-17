@@ -3312,7 +3312,7 @@ def generate_shard_path(shard_power, account, container, obj=None, shard=None,
         key = hash_path(account, container, obj, raw_digest=True)
         shard = struct.unpack_from('>I', key)[0] >> bit_shift
 
-    if not shard and shard_power == 0:
+    if shard is None and shard_power == 0:
         shard = -1
     path = [account, generate_shard_container_name(shard, container)]
     if obj:
