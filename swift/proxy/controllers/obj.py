@@ -509,6 +509,11 @@ class ObjectController(Controller):
         return req, delete_at_container, delete_at_part, delete_at_nodes
 
     def _get_object_count_in_sharded_container(self, req, container_info):
+        # This is slow, and there must be a better way.. but this works so
+        # in order to get shard_power growing and the reconciler working this
+        # will do.
+        # If this "is" the better way, maybe caching the result (and updating it
+        # with every container GET) would make it better.
         bitmap = Bitmap(bitmap=container_info['sysmeta'].get('shard-bitmap',
                                                              ''))
 
