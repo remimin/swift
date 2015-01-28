@@ -23,6 +23,7 @@ import cPickle as pickle
 
 import sqlite3
 
+from swift.common import shardtrie
 from swift.common.utils import Timestamp
 from swift.common.db import DatabaseBroker, utf8encode
 
@@ -243,6 +244,22 @@ class ContainerBroker(DatabaseBroker):
             VALUES (?)
         """, (storage_policy_index,))
 
+    def create_extra_shard_nodes_table(self, conn):
+        """
+        Create the object table which is specific to the container DB.
+        Not a part of Pluggable Back-ends, internal to the baseline code.
+
+        :param conn: DB connection object
+        """
+        conn.executescript("""
+            CREATE TABLE extra_shard_nodes (
+                ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
+                object TEXT,
+                created_at TEXT,
+                flag INTEGER,
+            );
+        """)
+
     def get_db_version(self, conn):
         if self._db_version == -1:
             self._db_version = 0
@@ -427,6 +444,14 @@ class ContainerBroker(DatabaseBroker):
             self._storage_policy_index = data['storage_policy_index']
             self.account = data['account']
             self.container = data['container']
+
+            sharded = self.metadata.get('X-Container-Sysmeta-Sharding')
+            if sharded:
+                # build the shard tree.
+                trie = shardtrie.ShardTrie()
+                for obj in self.list_objects_iter(
+                        storage_policy_index=data['storage_policy_index']):
+                    trie.add(obj[0], timestamp=obj[1])
             return data
 
     def set_x_container_sync_points(self, sync_point1, sync_point2):
@@ -903,3 +928,13 @@ class ContainerBroker(DatabaseBroker):
             ''' % (column_names, column_names) +
             CONTAINER_STAT_VIEW_SCRIPT +
             'COMMIT;')
+
+    def get_extra_shard_nodes(self):
+        self._commit_puts_stale_ok()
+        with self.get() as conn:
+            try:
+                    data = conn.execute('''
+                        SELECT object, created_at, flag
+                            FROM extra_shard_nodes;
+                    ''').fetchone()
+                except sqlite3.OperationalError as err:
