@@ -448,11 +448,26 @@ class ContainerBroker(DatabaseBroker):
             sharded = self.metadata.get('X-Container-Sysmeta-Sharding')
             if sharded:
                 # build the shard tree.
-                trie = shardtrie.ShardTrie()
-                for obj in self.list_objects_iter(
-                        storage_policy_index=data['storage_policy_index']):
-                    trie.add(obj[0], timestamp=obj[1])
+                trie, _errors = self.build_shard_trie()
+                self.shard_trie = trie
+                data['shardtrie'] = trie
             return data
+
+    def build_shard_trie(self):
+        trie = shardtrie.ShardTrie()
+        errors = []
+        for extra_node in self.get_extra_shard_nodes():
+            trie.add(extra_node[0], timestamp=extra_node[1],
+                     flag=extra_node[2])
+        for obj in self.list_objects_iter(
+                storage_policy_index=data['storage_policy_index']):
+            try:
+                trie.add(obj[0], timestamp=obj[1])
+            except shardtrie.ShardTrieDistributedBranchException as ex:
+                if ex.node.data['timestamp'] < obj[1]:
+                    errors.append((obj, ex.node))
+
+        return trie, errors
 
     def set_x_container_sync_points(self, sync_point1, sync_point2):
         with self.get() as conn:
@@ -930,11 +945,33 @@ class ContainerBroker(DatabaseBroker):
             'COMMIT;')
 
     def get_extra_shard_nodes(self):
+        data = []
         self._commit_puts_stale_ok()
         with self.get() as conn:
             try:
-                    data = conn.execute('''
-                        SELECT object, created_at, flag
-                            FROM extra_shard_nodes;
-                    ''').fetchone()
+                data = conn.execute('''
+                    SELECT object, created_at, flag
+                        FROM extra_shard_nodes;
+                    ''')
+            except Exception:
+                pass
+        return data
+
+    def set_extra_shard_nodes(self, nodes):
+        if nodes:
+            with self.get() as conn:
+                try:
+                    curs = conn.cursor()
+                    curs.execute('DELETE FROM extra_shard_nodes')
+
+                    conn.executemany(
+                        'INSERT INTO extra_shard_nodes (object, created_at, '
+                        'flag) VALUES (?, ?, ?)',
+                        ((r.key, r.data['timestamp'], r.data['flag']
+                          for r in nodes)))
                 except sqlite3.OperationalError as err:
+                    if "no such table: extra_shard_nodes" not in str(err):
+                        self.create_extra_shard_nodes_table(conn)
+                        self.set_extra_shard_nodes(nodes)
+                    else:
+                        raise

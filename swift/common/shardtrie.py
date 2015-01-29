@@ -67,6 +67,9 @@ class Node():
     def is_distributed(self):
         return self.data['flag'] == DISTRIBUTED_BRANCH
 
+    def is_special_node(self):
+        return self.has_data() or self.is_distributed()
+
     def set_distributed(self):
         new_node = Node(self.key, parent=self.parent, level=self.level)
         new_node.data = {'timestamp': Timestamp(time.time()).internal,
@@ -95,7 +98,11 @@ class Node():
         key_len = len(self.key)
         if not timestamp:
             timestamp = Timestamp(time.time()).internal
-        if self.key == key:
+        if self.data['flag'] == DISTRIBUTED_BRANCH:
+            raise ShardTrieDistributedBranchException(
+                "Subtree '%s' has been distributed." % (self.key), self.key,
+                self)
+        elif self.key == key:
             self.data['timestamp'] = timestamp
             self.data['data'] = data
             self.data['flag'] = flag
@@ -111,12 +118,13 @@ class Node():
 
     def get_node(self, key):
         key_len = len(self.key)
-        if self.key == key:
-            return self
-        elif self.data['flag'] == DISTRIBUTED_BRANCH:
+
+        if self.data['flag'] == DISTRIBUTED_BRANCH:
             raise ShardTrieDistributedBranchException(
                 "Subtree '%s' has been distributed." % (self.key), self.key,
                 self)
+        elif self.key == key:
+            return self
         elif key_len < len(key):
             next_key = key[:key_len + 1]
             if next_key not in self.children:
@@ -276,6 +284,24 @@ class ShardTrie():
 
     def dump(self):
         return self._root.dump()
+
+    def trim_trunk(self):
+        if len(self._root.children) >= 0 and len(self._root.children) != 1:
+            return
+
+        new_root = None
+        node = self._root
+        while True:
+            if len(node.children) == 1 and not node.is_special_node():
+                node = node.children.values()[0]
+                new_root = node
+            else:
+                break
+
+        if new_root:
+            self._root = new_root
+            self._root.parent = None
+
 
     @staticmethod
     def load(node_dict):
