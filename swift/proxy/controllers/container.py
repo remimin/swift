@@ -17,7 +17,8 @@ from swift import gettext_ as _
 from urllib import unquote
 import time
 
-from swift.common.utils import public, csv_append, Timestamp
+from swift.common.utils import public, csv_append, Timestamp, \
+    is_container_sharded, config_true_value
 from swift.common.constraints import check_metadata
 from swift.common import constraints
 from swift.common.http import HTTP_ACCEPTED, is_success
@@ -152,6 +153,9 @@ class ContainerController(Controller):
                 resp.body = 'Reached container limit of %s' % \
                     self.app.max_containers_per_account
                 return resp
+        if req.headers.get('X-Container-Sharding'):
+            req.headers['X-Container-Sysmeta-Sharding'] = config_true_value(
+                req.headers.get('X-Container-Sharding'))
         container_partition, containers = self.app.container_ring.get_nodes(
             self.account_name, self.container_name)
         headers = self._backend_requests(req, len(containers),
@@ -179,6 +183,11 @@ class ContainerController(Controller):
             self.account_info(self.account_name, req)
         if not accounts:
             return HTTPNotFound(request=req)
+        if req.headers.get('X-Container-Sharding'):
+            if config_true_value(req.headers.get('X-Container-Sharding')):
+                req.headers['X-Container-Sysmeta-Sharding'] = 'On'
+            else:
+                req.headers['X-Container-Sysmeta-Sharding'] = 'Off'
         container_partition, containers = self.app.container_ring.get_nodes(
             self.account_name, self.container_name)
         headers = self.generate_request_headers(req, transfer=True)

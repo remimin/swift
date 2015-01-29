@@ -462,7 +462,8 @@ class ContainerBroker(DatabaseBroker):
         for obj in self.list_objects_iter(
                 storage_policy_index=data['storage_policy_index']):
             try:
-                trie.add(obj[0], timestamp=obj[1])
+                data = dict(size=obj[2], content_type=obj[3], etag=obj[4])
+                trie.add(obj[0], timestamp=obj[1], data=data)
             except shardtrie.ShardTrieDistributedBranchException as ex:
                 if ex.node.data['timestamp'] < obj[1]:
                     errors.append((obj, ex.node))

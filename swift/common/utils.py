@@ -3249,3 +3249,7 @@ def get_md5_socket():
         raise IOError(ctypes.get_errno(), "Failed to accept MD5 socket")
 
     return md5_sockfd
+
+def is_container_sharded(container_info):
+    sharding = container_info['sysmeta'].get('sharding')
+    return True if sharding else False

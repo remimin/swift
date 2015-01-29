@@ -54,11 +54,11 @@ class Node():
         self.level = level
 
     @property
-    def key(self):
+    def Key(self):
         return self.key
 
     @property
-    def data(self):
+    def Data(self):
         return self.data
 
     def has_data(self):
@@ -143,10 +143,10 @@ class Node():
             if self.children:
                 self.data['timestamp'] = Timestamp(time.time()).internal
                 self.data['data'] = None
-                self.datap['flag'] = NODE_DELETED
+                self.data['flag'] = NODE_DELETED
             else:
                 # remove the node
-                del self.parent.children[self.path]
+                del self.parent.children[self.key]
                 self.data.update(DEFAULT_DATA)
                 self.children = None
                 self.parent = None
@@ -198,7 +198,7 @@ class ShardTrie():
         for node in self._root:
             yield node
 
-    def add(self, key, data=[], timestamp=None, flag=DATA_PRESENT):
+    def add(self, key, data=None, timestamp=None, flag=DATA_PRESENT):
         self._root.add(key, data, timestamp, flag)
 
     def get(self, key, full=False):
@@ -242,21 +242,35 @@ class ShardTrie():
                 if n.is_distributed():
                     yield n
 
-    def get_important_nodes(self, key=None):
+    def get_important_nodes(self, key=None, limit=None, marker=None):
         """Generator returning but the data and distributed nodes in the tree.
 
         :param key: The key pointing to the part of the tree to start the
                     search from, default is the root.
         """
+        start_yielding = True
+        yielded_count = 0
+
         if not key:
             node = self._root
         else:
             node = self.get_node(key)
 
+        if marker:
+            start_yielding = False
+
         if node:
             for n in node:
                 if n.is_distributed() or n.has_data():
-                    yield n
+                    if limit and yielded_count >= limit:
+                        raise StopIteration()
+                    if marker and n == marker:
+                        start_yielding = True
+                        continue
+                    if start_yielding:
+                        yielded_count += 1
+                        yield n
+
 
     def split_trie(self, key):
         """Splits the tree at key.
@@ -317,7 +331,8 @@ class ShardTrie():
 
             child_node = ShardTrie.load(child)
             child_node.parent = node
-            node.children[child_node.key] = child_node
+            node.children[child_node._root.key] = child_node._root
+            node.children[child_node._root.key].parent = node
 
         return ShardTrie(root_node=node)
 
