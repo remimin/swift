@@ -16,17 +16,21 @@
 from swift import gettext_ as _
 from urllib import unquote
 import time
+import json
+from itertools import chain
 
 from swift.common.utils import public, csv_append, Timestamp, \
     is_container_sharded, config_true_value
 from swift.common.constraints import check_metadata
 from swift.common import constraints
 from swift.common.http import HTTP_ACCEPTED, is_success
+from swift.common.request_helpers import get_listing_content_type, \
+    get_container_shard_path
 from swift.proxy.controllers.base import Controller, delay_denial, \
     cors_validation, clear_info_cache
 from swift.common.storage_policy import POLICIES
 from swift.common.swob import HTTPBadRequest, HTTPForbidden, \
-    HTTPNotFound
+    HTTPNotFound, HTTPServerError, Response
 
 
 class ContainerController(Controller):
@@ -82,15 +86,138 @@ class ContainerController(Controller):
                         return HTTPBadRequest(request=req, body=str(err))
         return None
 
+    def GETorHEAD_sharded(self, req, container_info):
+        # TODO: build a new respose, loop through the tree. But first need utils
+        # to generate the account name and container name etc.
+        trie = container_info.get('shardtrie')
+        if not trie:
+            return HTTPServerError("Failed to build shardtrie")
+
+        listing_content_type = get_listing_content_type(req)
+
+        responses = list()
+        iterator_func = 'get_important_nodes'
+        if req.mehod == "HEAD":
+            iterator_func = 'get_distributed_nodes'
+
+        def _run_single_request(account_name, container_name):
+            part = self.app.container_ring.get_part(
+                account_name, container_name)
+
+            path = '/v1/%s/%s' % (account_name, container_name)
+            tmp_resp = self.GETorHEAD_base(
+                req, _('Container'), self.app.container_ring, part, path)
+            return tmp_resp
+
+        def _get_nodes_from_trie(shard_trie):
+            resps = list()
+            objects = list()
+            for node in getattr(shard_trie,  iterator_func)():
+                if node.is_distributed():
+                    acct, cont = get_container_shard_path(self.account_name,
+                                                          self.container_name,
+                                                          node.key)
+                    resp = _run_single_request(acct, cont)
+                    #if not is_success(resp.status_int):
+                    #    return HTTPServerError('failed')
+                    responses.append(resp)
+                    cont_info = self.container_info(acct, cont)
+                    tmp_resps, tmp_obs = _get_nodes_from_trie(
+                        cont_info.get('shardtrie'))
+                    resps.extend(tmp_resps)
+                    objects.extend(tmp_obs)
+                else:
+                    # is a data node
+                    obj = dict(
+                        hash=node.data['data']['etag'],
+                        bytes=node.data['data']['size'],
+                        content_type=node.data['data']['content_type'],
+                        last_modified=node.data['timestamp'],
+                        name=node.key
+                    )
+                    if 'json' in listing_content_type:
+                        objects.append(obj)
+                    elif 'xml' in listing_content_type:
+                        xml = "<object><name>%(name)s</name>"
+                        xml += "<hash>%(hash)s</hash><bytes>%(bytes)s</bytes>"
+                        xml += "<content_type>%(content_type)s</content_type>"
+                        xml += "<last_modified>%(last_modified)s"
+                        xml += "</last_modified></object>"
+                        objects.append(xml % obj)
+                    else:
+                        objects.append(obj['name'])
+            return resps, objects
+
+        # First run the command on the current container
+        resp = _run_single_request(self.account_name, self.container_name)
+        if not is_success(resp.status_int):
+            return resp
+        responses.append(resp)
+
+        # Now run it on all shards so parse trie
+        new_responses, objects = _get_nodes_from_trie(trie)
+        responses.extend(new_responses)
+
+        # now we can build the response
+        resp_status = 500
+        resp_headers = None
+        object_count = 0
+        bytes_used = 0
+        for resp in responses:
+            if resp.is_success:
+                if not resp_headers:
+                    resp_headers = resp.headers.copy()
+                    resp_status = resp.status
+                if is_success(resp.status_int) and resp.status_int != 204:
+                    resp_status = resp.status
+
+                object_count += \
+                    int(resp.headers.get("X-Container-Object-Count", 0))
+                bytes_used += \
+                    int(resp.headers.get("X-Container-Bytes-Used", 0))
+            else:
+                raise HTTPServerError("Failed to talk to container shard")
+
+        resp_headers["X-Container-Bytes-Used"] = str(bytes_used)
+        resp_headers["X-Container-Object-Count"] = str(object_count)
+
+        if is_container_sharded(container_info):
+            resp_headers['X-Container-Sharding'] = 'On'
+
+        # Generate body
+        if 'xml' in listing_content_type:
+            head = '<?xml version="1.0" encoding="UTF-8"?>\n'
+            head += '<container name="%s">' % self.container_name
+            tail = '</container>'
+            content_length = sum(map(len, objects))
+            content_length += len(head) + len(tail)
+            resp_headers["content-length"] = str(content_length)
+            return Response(app_iter=chain([head], objects, [tail]),
+                            status=resp_status, headers=resp_headers)
+        elif 'json' in listing_content_type:
+            body = json.dumps(objects)
+            resp_headers["content-length"] = str(len(body))
+            return Response(body=body, status=resp_status, headers=resp_headers)
+
+        content_length = sum(map(len, objects))
+        resp_headers["content-length"] = str(content_length)
+        return Response(app_iter=objects, status=resp_status,
+                        headers=resp_headers)
+
     def GETorHEAD(self, req):
         """Handler for HTTP GET/HEAD requests."""
         if not self.account_info(self.account_name, req)[1]:
             return HTTPNotFound(request=req)
-        part = self.app.container_ring.get_part(
-            self.account_name, self.container_name)
-        resp = self.GETorHEAD_base(
-            req, _('Container'), self.app.container_ring, part,
-            req.swift_entity_path)
+        container_info = self.container_info(self.account_name,
+                                             self.container_name)
+        if is_container_sharded(container_info):
+            resp = self.GETorHEAD_sharded(req, container_info)
+        else:
+            part = self.app.container_ring.get_part(
+                self.account_name, self.container_name)
+            resp = self.GETorHEAD_base(
+                req, _('Container'), self.app.container_ring, part,
+                req.swift_entity_path)
         if 'swift.authorize' in req.environ:
             req.acl = resp.headers.get('x-container-read')
             aresp = req.environ['swift.authorize'](req)
@@ -198,6 +325,40 @@ class ContainerController(Controller):
             req.swift_entity_path, [headers] * len(containers))
         return resp
 
+    def _delete_shards(self, trie, req, root=False):
+        resp = HTTPNotFound()
+        deleted_nodes = list()
+        for node in trie.get_distributed_nodes():
+            acct, cont = get_container_shard_path(self.account_name,
+                                                  self.container_name,
+                                                  node.key)
+            cont_info = self.container_info(acct, cont)
+
+            resp = self._delete_shards(cont_info['shardtrie'], req)
+
+            if not is_success(resp.status_int):
+                return resp
+
+            account_partition, accounts, container_count = \
+                self.account_info(acct, req)
+            container_partition, containers = \
+                self.app.container_ring.get_nodes(acct, cont)
+            headers = self._backend_requests(req, len(containers),
+                                             account_partition, accounts)
+            resp = self.make_requests(
+                req, self.app.container_ring, container_partition, 'DELETE',
+                req.swift_entity_path, headers)
+            if is_success(resp.status_int):
+                deleted_nodes.append(node.key)
+
+        if deleted_nodes:
+            #todo send a post to container to remove these nodes from trie.
+            # If root, then use self.container_name etc.
+            pass
+        return resp
+
+
+
     @public
     @cors_validation
     def DELETE(self, req):
@@ -206,6 +367,14 @@ class ContainerController(Controller):
             self.account_info(self.account_name, req)
         if not accounts:
             return HTTPNotFound(request=req)
+        # If we are dealing with a sharded container, attempt to run
+        # the delete on shard containers first.
+        container_info = self.container_info(self.account_name,
+                                             self.container_name)
+        if is_container_sharded(container_info):
+            trie = container_info.get('shardtrie')
+            resp = self._delete_shards(trie, req, root=True)
+
         container_partition, containers = self.app.container_ring.get_nodes(
             self.account_name, self.container_name)
         headers = self._backend_requests(req, len(containers),

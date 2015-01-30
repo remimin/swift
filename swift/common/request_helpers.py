@@ -423,3 +423,13 @@ class SegmentedIterable(object):
             return itertools.chain([pc], self.app_iter)
         else:
             return self.app_iter
+
+def get_container_shard_path(account, container, prefix):
+    acct = ".sharded_%s" % account
+    cont = "%s.prefix.%s" % (container, prefix.replace('/', '_'))
+    return acct, cont
+
+def decode_shard_path(account, container):
+    acct = account.split('.sharded_', 1)[-1]
+    cont = container.split('.prefix.', 1)[0]
+    return acct, cont
