@@ -38,12 +38,13 @@ from eventlet.timeout import Timeout
 from swift.common.utils import (
     clean_content_type, config_true_value, ContextPool, csv_append,
     GreenAsyncPile, GreenthreadSafeIterator, json, Timestamp,
-    normalize_delete_at_timestamp, public, quorum_size, get_expirer_container)
+    normalize_delete_at_timestamp, public, quorum_size, get_expirer_container,
+    is_container_sharded)
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_metadata, check_object_creation, \
     check_copy_from_header, check_destination_header, \
     check_account_format
-from swift.common import constraints
+from swift.common import constraints, shardtrie
 from swift.common.exceptions import ChunkReadTimeout, \
     ChunkWriteTimeout, ConnectionTimeout, ListingIterNotFound, \
     ListingIterNotAuthorized, ListingIterError
@@ -59,7 +60,7 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
     HTTPServerError, HTTPServiceUnavailable, Request, \
     HTTPClientDisconnect
 from swift.common.request_helpers import is_sys_or_user_meta, is_sys_meta, \
-    remove_items, copy_header_subset
+    remove_items, copy_header_subset, get_container_shard_path
 
 
 def copy_headers_into(from_r, to_r):
@@ -171,6 +172,46 @@ class ObjectController(Controller):
         return self.app.iter_nodes(
             ring, partition, node_iter=local_first_node_iter)
 
+    def _get_shard_node(self, trie, container_info):
+        """
+        Recurrsive funtion that finds the node (or none) but more importantly
+        the prefix of the subtree an object sits.
+
+        When sharded this could be a different container, so we need to send a
+        HEAD to get container info to access the next trie. Because it's
+        recurrsive, we pass in the container_info in and out, to save an
+        additional HEAD request called to the server.
+
+
+        :param trie: The current (sub)trie to check,
+        :param container_info: The container info of the current container.
+        :return: a tuple (prefix, container_info)
+        """
+        try:
+            _node = trie.get_node(self.object_name)
+            return trie.root_key, container_info
+        except shardtrie.ShardTrieDistributedBranchException as ex:
+            acct, cont = get_container_shard_path(self.account_name,
+                                                  self.container_name,
+                                                  ex.key)
+            cont_info = self.container_info(acct, cont)
+            new_trie = cont_info['shardtrie']
+            new_trie.trim_trunk()
+            return self._get_shard_node(new_trie, cont_info)
+
+    def _find_shard_path(self, container_info):
+        trie = container_info['shardtrie']
+        prefix, container_info = self._get_shard_node(trie, container_info)
+        if prefix:
+            acct, cont = get_container_shard_path(self.account_name,
+                                                  self.container_name,
+                                                  prefix)
+        else:
+            acct, cont = self.account_name, self.container_name
+
+        path = "/v1/%s/%s/%s" % (acct, cont, self.object_name)
+        return acct, cont, path, container_info
+
     def GETorHEAD(self, req):
         """Handle HTTP GET or HEAD requests."""
         container_info = self.container_info(
@@ -185,6 +226,10 @@ class ObjectController(Controller):
             aresp = req.environ['swift.authorize'](req)
             if aresp:
                 return aresp
+
+        if is_container_sharded(container_info):
+            self.account_name, self.container_name, req.path_info, \
+                container_info = self._find_shard_path(container_info)
         partition = obj_ring.get_part(
             self.account_name, self.container_name, self.object_name)
         resp = self.GETorHEAD_base(
@@ -241,6 +286,12 @@ class ObjectController(Controller):
                 return error_response
             container_info = self.container_info(
                 self.account_name, self.container_name, req)
+
+            # in case the object has been sharded to a new container
+            if is_container_sharded(container_info):
+                self.account_name, self.container_name, req.path_info, \
+                    container_info = self._find_shard_path(container_info)
+
             container_partition = container_info['partition']
             containers = container_info['nodes']
             req.acl = container_info['write_acl']
@@ -454,6 +505,12 @@ class ObjectController(Controller):
                                   body='If-None-Match only supports *')
         container_info = self.container_info(
             self.account_name, self.container_name, req)
+
+        # in case the object has been sharded to a new container
+        if is_container_sharded(container_info):
+            self.account_name, self.container_name, req.path_info, \
+                container_info = self._find_shard_path(container_info)
+
         policy_index = req.headers.get('X-Backend-Storage-Policy-Index',
                                        container_info['storage_policy'])
         obj_ring = self.app.get_object_ring(policy_index)
@@ -765,6 +822,12 @@ class ObjectController(Controller):
         policy_index = req.headers.get('X-Backend-Storage-Policy-Index',
                                        container_info['storage_policy'])
         obj_ring = self.app.get_object_ring(policy_index)
+
+        # in case the object has been sharded to a new container
+        if is_container_sharded(container_info):
+            self.account_name, self.container_name, req.path_info, \
+                container_info = self._find_shard_path(container_info)
+
         # pass the policy index to storage nodes via req header
         req.headers['X-Backend-Storage-Policy-Index'] = policy_index
         container_partition = container_info['partition']

@@ -106,6 +106,7 @@ class Node():
             self.data['timestamp'] = timestamp
             self.data['data'] = data
             self.data['flag'] = flag
+            return True
         elif key_len < len(key):
             next_key = key[:key_len + 1]
             if next_key not in self.children:
@@ -114,7 +115,7 @@ class Node():
                                 level=self.level + 1)
                 self.children[next_key] = new_node
 
-            self.children[next_key].add(key, data, timestamp, flag)
+            return self.children[next_key].add(key, data, timestamp, flag)
 
     def get_node(self, key):
         key_len = len(self.key)
@@ -150,12 +151,13 @@ class Node():
                 self.data.update(DEFAULT_DATA)
                 self.children = None
                 self.parent = None
+            return True
         elif key_len < len(key):
             next_key = key[:key_len + 1]
             if next_key not in self.children:
-                return None
+                return False
 
-            self.children[next_key].delete(key)
+            return self.children[next_key].delete(key)
 
     def dump(self, dump_level=False):
         node_dict = {
@@ -199,7 +201,7 @@ class ShardTrie():
             yield node
 
     def add(self, key, data=None, timestamp=None, flag=DATA_PRESENT):
-        self._root.add(key, data, timestamp, flag)
+        return self._root.add(key, data, timestamp, flag)
 
     def get(self, key, full=False):
         return self._root.get(key, full)
@@ -208,7 +210,7 @@ class ShardTrie():
         return self._root.get_node(key)
 
     def delete(self, key):
-        self._root.delete(key)
+        return self._root.delete(key)
 
     def get_data_nodes(self, key=None):
         """ Generator returning data only nodes.

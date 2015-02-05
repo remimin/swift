@@ -22,15 +22,15 @@ from itertools import chain
 from swift.common.utils import public, csv_append, Timestamp, \
     is_container_sharded, config_true_value
 from swift.common.constraints import check_metadata
-from swift.common import constraints
+from swift.common import constraints, wsgi
 from swift.common.http import HTTP_ACCEPTED, is_success
 from swift.common.request_helpers import get_listing_content_type, \
-    get_container_shard_path
+    get_container_shard_path, get_sys_meta_prefix
 from swift.proxy.controllers.base import Controller, delay_denial, \
     cors_validation, clear_info_cache
 from swift.common.storage_policy import POLICIES
 from swift.common.swob import HTTPBadRequest, HTTPForbidden, \
-    HTTPNotFound, HTTPServerError, Response
+    HTTPNotFound, HTTPServerError, Response, Request
 
 
 class ContainerController(Controller):
@@ -281,7 +281,8 @@ class ContainerController(Controller):
                     self.app.max_containers_per_account
                 return resp
         if req.headers.get('X-Container-Sharding'):
-            req.headers['X-Container-Sysmeta-Sharding'] = config_true_value(
+            sysmeta_header = get_sys_meta_prefix('container') + 'sharding'
+            req.headers[sysmeta_header] = config_true_value(
                 req.headers.get('X-Container-Sharding'))
         container_partition, containers = self.app.container_ring.get_nodes(
             self.account_name, self.container_name)
@@ -311,10 +312,11 @@ class ContainerController(Controller):
         if not accounts:
             return HTTPNotFound(request=req)
         if req.headers.get('X-Container-Sharding'):
+            sysmeta_header = get_sys_meta_prefix('container') + 'sharding'
             if config_true_value(req.headers.get('X-Container-Sharding')):
-                req.headers['X-Container-Sysmeta-Sharding'] = 'On'
+                req.headers[sysmeta_header] = 'On'
             else:
-                req.headers['X-Container-Sysmeta-Sharding'] = 'Off'
+                req.headers[sysmeta_header] = 'Off'
         container_partition, containers = self.app.container_ring.get_nodes(
             self.account_name, self.container_name)
         headers = self.generate_request_headers(req, transfer=True)
@@ -326,8 +328,10 @@ class ContainerController(Controller):
         return resp
 
     def _delete_shards(self, trie, req, root=False):
-        resp = HTTPNotFound()
+        resp = None
         deleted_nodes = list()
+        if not root:
+            trie.trim_trunk()
         for node in trie.get_distributed_nodes():
             acct, cont = get_container_shard_path(self.account_name,
                                                   self.container_name,
@@ -336,7 +340,7 @@ class ContainerController(Controller):
 
             resp = self._delete_shards(cont_info['shardtrie'], req)
 
-            if not is_success(resp.status_int):
+            if resp is not None and not is_success(resp.status_int):
                 return resp
 
             account_partition, accounts, container_count = \
@@ -352,9 +356,22 @@ class ContainerController(Controller):
                 deleted_nodes.append(node.key)
 
         if deleted_nodes:
-            #todo send a post to container to remove these nodes from trie.
+            # Send a post to container to remove these nodes from trie.
             # If root, then use self.container_name etc.
-            pass
+            prefix = None if root else trie.key
+            acct, cont = get_container_shard_path(self.account_name,
+                                                  self.container_name,
+                                                  prefix)
+            del_keys_header = get_sys_meta_prefix('container') + 'shard-rm-keys'
+            headers = {del_keys_header: ','.join(deleted_nodes)}
+            path = '/v1/%s/%s' % (acct, cont)
+
+            post_req = wsgi.make_subrequest(req.environ, 'POST', path,
+                                            headers=headers, swift_source='CS')
+            post_resp = self.POST(post_req)
+            if not is_success(post_resp.status_int):
+                resp = post_resp
+
         return resp
 
 
@@ -374,6 +391,8 @@ class ContainerController(Controller):
         if is_container_sharded(container_info):
             trie = container_info.get('shardtrie')
             resp = self._delete_shards(trie, req, root=True)
+            if not resp.is_success():
+                return resp
 
         container_partition, containers = self.app.container_ring.get_nodes(
             self.account_name, self.container_name)

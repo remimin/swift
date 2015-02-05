@@ -27,13 +27,13 @@ from swift.container.replicator import ContainerReplicatorRpc
 from swift.common.db import DatabaseAlreadyExists
 from swift.common.container_sync_realms import ContainerSyncRealms
 from swift.common.request_helpers import get_param, get_listing_content_type, \
-    split_and_validate_path, is_sys_or_user_meta
+    split_and_validate_path, is_sys_or_user_meta, get_sys_meta_prefix
 from swift.common.utils import get_logger, hash_path, public, \
     Timestamp, storage_directory, validate_sync_to, \
     config_true_value, json, timing_stats, replication, \
     override_bytes_from_content_type, get_log_line
 from swift.common.constraints import check_mount, valid_timestamp, check_utf8
-from swift.common import constraints
+from swift.common import constraints, shardtrie
 from swift.common.bufferedhttp import http_connect
 from swift.common.exceptions import ConnectionTimeout
 from swift.common.http import HTTP_NOT_FOUND, is_success
@@ -549,8 +549,46 @@ class ContainerController(BaseStorageServer):
                         metadata['X-Container-Sync-To'][0] != \
                         broker.metadata['X-Container-Sync-To'][0]:
                     broker.set_x_container_sync_points(-1, -1)
+            metadata = self._deal_with_shard_metadata(metadata, broker)
             broker.update_metadata(metadata, validate_metadata=True)
         return HTTPNoContent(request=req)
+
+    def _deal_with_shard_metadata(self, metadata, broker):
+        del_keys_header = get_sys_meta_prefix('container') + 'shard-rm-keys'
+        new_keys_header = get_sys_meta_prefix('container') + 'shard-new-keys'
+        added = deleted = False
+
+        # Shortcut if no sharded metadata
+        if del_keys_header not in metadata and new_keys_header not in metadata:
+            return metadata
+
+        trie = broker.build_shard_trie()
+        if del_keys_header in metadata:
+            modified = False
+            for key in metadata[del_keys_header].split(','):
+                deleted = trie.delete(key)
+                if not modified and deleted:
+                    modified = deleted
+            deleted = modified
+            del metadata[del_keys_header]
+
+        if new_keys_header in metadata:
+            modified = False
+            for key in metadata[new_keys_header].split(','):
+                try:
+                    added = trie.add(key, flag=shardtrie.DISTRIBUTED_BRANCH)
+                except shardtrie.ShardTrieDistributedBranchException as ex:
+                    # TODO deal with this case better
+                    added = False
+                if not modified and added:
+                    modified = added
+            added = modified
+            del metadata[new_keys_header]
+
+        if deleted or added:
+            broker.set_extra_shard_nodes(trie.get_distributed_nodes())
+
+        return metadata
 
     def __call__(self, env, start_response):
         start_time = time.time()

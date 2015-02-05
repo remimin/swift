@@ -805,11 +805,11 @@ class Request(object):
     charset = None
     _params_cache = None
     _timestamp = None
-    acl = _req_environ_property('swob.ACL')
-
     def __init__(self, environ):
         self.environ = environ
         self.headers = HeaderEnvironProxy(self.environ)
+
+    acl = _req_environ_property('swob.ACL')
 
     @classmethod
     def blank(cls, path, environ=None, headers=None, body=None, **kwargs):

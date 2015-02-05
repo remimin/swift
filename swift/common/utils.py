@@ -3250,6 +3250,7 @@ def get_md5_socket():
 
     return md5_sockfd
 
+
 def is_container_sharded(container_info):
     sharding = container_info['sysmeta'].get('sharding')
     return True if sharding else False

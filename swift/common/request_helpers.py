@@ -424,7 +424,9 @@ class SegmentedIterable(object):
         else:
             return self.app_iter
 
-def get_container_shard_path(account, container, prefix):
+def get_container_shard_path(account, container, prefix=None):
+    if not prefix:
+        return account, container
     acct = ".sharded_%s" % account
     cont = "%s.prefix.%s" % (container, prefix.replace('/', '_'))
     return acct, cont
