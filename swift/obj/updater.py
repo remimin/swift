@@ -23,9 +23,11 @@ from random import random
 
 from eventlet import spawn, patcher, Timeout
 
+from swift.common import internal_client, shardtrie
 from swift.common.bufferedhttp import http_connect
 from swift.common.exceptions import ConnectionTimeout
 from swift.common.ring import Ring
+from swift.common.request_helpers import get_container_shard_path
 from swift.common.utils import get_logger, renamer, write_pickle, \
     dump_recon_cache, config_true_value, ismount
 from swift.common.daemon import Daemon
@@ -202,6 +204,31 @@ class ObjectUpdater(Daemon):
                     pass
             self.logger.timing_since('timing', start_time)
 
+    def _get_shard_node(self, trie, update_dict, client):
+        try:
+            _node = trie.get_node(update_dict['obj'])
+            return trie.root_key
+        except shardtrie.ShardTrieDistributedBranchException as ex:
+            acct, cont = get_container_shard_path(update_dict['account'],
+                                                  update_dict['container'],
+                                                  ex.key)
+            metadata = client.get_container_metadata(acct, cont)
+            new_trie = metadata.get('X-Backend-Shardtrie')
+            new_trie.trim_trunk()
+            return self._get_shard_node(new_trie, update_dict, client)
+
+    def _find_shard_path(self, trie, update_dict, client):
+        prefix = self._get_shard_node(trie, update_dict['obj'],
+                                                      client)
+        if prefix:
+            acct, cont = get_container_shard_path(update_dict['account'],
+                                                  update_dict['container'],
+                                                  prefix)
+        else:
+            acct, cont = update_dict['account'], update_dict['container']
+
+        return acct, cont
+
     def process_object_update(self, update_path, device, policy_idx):
         """
         Process the object information to be updated and update.
@@ -221,6 +248,20 @@ class ObjectUpdater(Daemon):
                     os.path.basename(update_path)))
             return
         successes = update.get('successes', [])
+
+        # We need to find out if the container is sharded
+        conf_path = self.conf.get('__file__') or \
+                    '/etc/swift/object-expirer.conf'
+        # TODO set retries to somthing configurable below (not 3)
+        client = internal_client.InternalClient(conf_path,
+                                                'Swift Object Updater', 3)
+        metadata = client.get_container_metadata(update['account'],
+                                                 update['container'])
+        if metadata.get('X-Backend-Shardtrie'):
+            trie = metadata.get('X-Backend-Shardtrie')
+            update['account'], update['container'] = \
+                self._find_shard_path(trie, update, client)
+
         part, nodes = self.get_container_ring().get_nodes(
             update['account'], update['container'])
         obj = '/%s/%s/%s' % \

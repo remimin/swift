@@ -497,7 +497,11 @@ class ObjectController(BaseStorageServer):
                 'x-size': metadata['Content-Length'],
                 'x-content-type': metadata['Content-Type'],
                 'x-timestamp': metadata['X-Timestamp'],
-                'x-etag': metadata['ETag']}),
+                'x-etag': metadata['ETag'],
+                'x-shard-account':
+                    request.headers.get('X-Backend-Shard-Account'),
+                'x-shard-container':
+                    request.headers.get('X-Backend-Shard-Container')}),
             device, policy_idx)
         return HTTPCreated(request=request, etag=etag)
 

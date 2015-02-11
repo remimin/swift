@@ -59,6 +59,7 @@ def gen_resp_headers(info, is_deleted=False):
         'X-Backend-Status-Changed-At': Timestamp(
             info.get('status_changed_at', 0)).internal,
         'X-Backend-Storage-Policy-Index': info.get('storage_policy_index', 0),
+        'X-Backend-Shardtrie': info.get('shardtrie', '')
     }
     if not is_deleted:
         # base container info on deleted containers is not exposed to client

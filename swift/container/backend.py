@@ -450,7 +450,7 @@ class ContainerBroker(DatabaseBroker):
                 # build the shard tree.
                 trie, _errors = self.build_shard_trie()
                 self.shard_trie = trie
-                data['shardtrie'] = trie
+                data['shardtrie'] = trie.dump()
             return data
 
     def build_shard_trie(self):
@@ -968,7 +968,7 @@ class ContainerBroker(DatabaseBroker):
                     conn.executemany(
                         'INSERT INTO extra_shard_nodes (object, created_at, '
                         'flag) VALUES (?, ?, ?)',
-                        ((r.key, r.data['timestamp'], r.data['flag']
+                        ((r.key, r.timestamp, r.flag
                           for r in nodes)))
                 except sqlite3.OperationalError as err:
                     if "no such table: extra_shard_nodes" not in str(err):

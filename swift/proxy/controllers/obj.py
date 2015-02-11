@@ -287,10 +287,13 @@ class ObjectController(Controller):
             container_info = self.container_info(
                 self.account_name, self.container_name, req)
 
+            # Lets not do things to objects, that way they are always
+            # accessible.
+            #
             # in case the object has been sharded to a new container
-            if is_container_sharded(container_info):
-                self.account_name, self.container_name, req.path_info, \
-                    container_info = self._find_shard_path(container_info)
+            # if is_container_sharded(container_info):
+            #    self.account_name, self.container_name, req.path_info, \
+            #        container_info = self._find_shard_path(container_info)
 
             container_partition = container_info['partition']
             containers = container_info['nodes']
@@ -508,8 +511,11 @@ class ObjectController(Controller):
 
         # in case the object has been sharded to a new container
         if is_container_sharded(container_info):
-            self.account_name, self.container_name, req.path_info, \
+            shard_acct, shard_cont, shard_path, \
                 container_info = self._find_shard_path(container_info)
+
+            req.headers['X-Backend-Shard-Account'] = shard_acct
+            req.headers['X-Backend-Shard-Container'] = shard_cont
 
         policy_index = req.headers.get('X-Backend-Storage-Policy-Index',
                                        container_info['storage_policy'])

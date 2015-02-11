@@ -23,7 +23,6 @@ DATA_PRESENT = 1
 NODE_DELETED = 2
 DISTRIBUTED_BRANCH = 3
 
-DEFAULT_DATA = {'timestamp': '', 'flag': EMPTY, 'data': None}
 
 class ShardTrieDistributedBranchException(Exception):
     def __init__(self, msg, key, node):
@@ -47,8 +46,9 @@ class ShardTrieException(Exception):
 class Node():
     def __init__(self, key, parent=None, level=1):
         self.key = key
-        self.data = {}
-        self.data.update(DEFAULT_DATA)
+        self.data = None
+        self.timestamp = None
+        self.flag = EMPTY
         self.parent = parent
         self.children = dict()
         self.level = level
@@ -61,20 +61,27 @@ class Node():
     def Data(self):
         return self.data
 
+    @property
+    def Timestamp(self):
+        return self.timestamp
+
+    @property
+    def Flag(self):
+        return self.flag
+
     def has_data(self):
-        return self.data['flag'] == DATA_PRESENT
+        return self.flag == DATA_PRESENT
 
     def is_distributed(self):
-        return self.data['flag'] == DISTRIBUTED_BRANCH
+        return self.flag == DISTRIBUTED_BRANCH
 
     def is_special_node(self):
         return self.has_data() or self.is_distributed()
 
     def set_distributed(self):
         new_node = Node(self.key, parent=self.parent, level=self.level)
-        new_node.data = {'timestamp': Timestamp(time.time()).internal,
-                         'data': None,
-                         'flag': DISTRIBUTED_BRANCH}
+        new_node.timestamp = Timestamp(time.time()).internal
+        new_node.flag = DISTRIBUTED_BRANCH
         self.parent.children[self.key] = new_node
         self.parent = None
         return self
@@ -98,14 +105,14 @@ class Node():
         key_len = len(self.key)
         if not timestamp:
             timestamp = Timestamp(time.time()).internal
-        if self.data['flag'] == DISTRIBUTED_BRANCH:
+        if self.flag == DISTRIBUTED_BRANCH:
             raise ShardTrieDistributedBranchException(
                 "Subtree '%s' has been distributed." % (self.key), self.key,
                 self)
         elif self.key == key:
-            self.data['timestamp'] = timestamp
-            self.data['data'] = data
-            self.data['flag'] = flag
+            self.timestamp = timestamp
+            self.data = data
+            self.flag = flag
             return True
         elif key_len < len(key):
             next_key = key[:key_len + 1]
@@ -120,7 +127,7 @@ class Node():
     def get_node(self, key):
         key_len = len(self.key)
 
-        if self.data['flag'] == DISTRIBUTED_BRANCH:
+        if self.flag == DISTRIBUTED_BRANCH:
             raise ShardTrieDistributedBranchException(
                 "Subtree '%s' has been distributed." % (self.key), self.key,
                 self)
@@ -142,13 +149,15 @@ class Node():
         key_len = len(self.key)
         if self.key == key:
             if self.children:
-                self.data['timestamp'] = Timestamp(time.time()).internal
-                self.data['data'] = None
-                self.data['flag'] = NODE_DELETED
+                self.timestamp = Timestamp(time.time()).internal
+                self.data = None
+                self.flag = NODE_DELETED
             else:
                 # remove the node
                 del self.parent.children[self.key]
-                self.data.update(DEFAULT_DATA)
+                self.data = None
+                self.flag = EMPTY
+                self.timestamp = None
                 self.children = None
                 self.parent = None
             return True
@@ -163,6 +172,8 @@ class Node():
         node_dict = {
             'parent': self.parent.key if self.parent else 'None',
             'key': self.key,
+            'flag': self.flag,
+            'timestamp': self.timestamp if self.timestamp else 'None',
             'data': self.data,
             'children': [],
         }
@@ -187,6 +198,9 @@ class ShardTrie():
             self._root = root_node
         else:
             self._root = Node(root_key, level=level)
+
+    def __getitem__(self, key):
+        return self.get_node(key)
 
     @property
     def root(self):
@@ -321,12 +335,14 @@ class ShardTrie():
 
     @staticmethod
     def load(node_dict):
-        for key in ('parent', 'key', 'data', 'children'):
+        for key in ('parent', 'key', 'data', 'children', 'timestamp', 'flag'):
             if key not in node_dict:
                 raise ShardTrieException('Malformed ShardTrie node dictionary')
 
         node = Node(node_dict['key'], level=node_dict.get('level', 1))
         node.data = node_dict['data']
+        node.timestamp = node_dict.get('timestamp')
+        node.flag = node_dict.get('flag', EMPTY)
         for child in node_dict['children']:
             if not child.get('level'):
                 child['level'] = node.level + 1
@@ -341,7 +357,6 @@ class ShardTrie():
     def get_large_subtries(self, count=30):
         results = []
         for node in self:
-            print node.key
             data_count = node.count_data_nodes()
             if data_count > count and node.level > self.root.level:
                 results.append((node.level, data_count, node))
