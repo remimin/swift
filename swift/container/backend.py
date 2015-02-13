@@ -965,11 +965,10 @@ class ContainerBroker(DatabaseBroker):
                     curs = conn.cursor()
                     curs.execute('DELETE FROM extra_shard_nodes')
 
-                    conn.executemany(
+                    curs.executemany(
                         'INSERT INTO extra_shard_nodes (object, created_at, '
                         'flag) VALUES (?, ?, ?)',
-                        ((r.key, r.timestamp, r.flag
-                          for r in nodes)))
+                        ((r.key, r.timestamp, r.flag) for r in nodes))
                 except sqlite3.OperationalError as err:
                     if "no such table: extra_shard_nodes" not in str(err):
                         self.create_extra_shard_nodes_table(conn)
