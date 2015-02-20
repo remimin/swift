@@ -24,6 +24,7 @@ import cPickle as pickle
 import sqlite3
 
 from swift.common import shardtrie
+from swift.common.constraints import CONTAINER_LISTING_LIMIT
 from swift.common.utils import Timestamp
 from swift.common.db import DatabaseBroker, utf8encode
 
@@ -448,19 +449,21 @@ class ContainerBroker(DatabaseBroker):
             sharded = self.metadata.get('X-Container-Sysmeta-Sharding')
             if sharded:
                 # build the shard tree.
-                trie, _errors = self.build_shard_trie()
+                trie, _errors = self.build_shard_trie(
+                    data['storage_policy_index'])
                 self.shard_trie = trie
                 data['shardtrie'] = trie.dump()
             return data
 
-    def build_shard_trie(self):
+    def build_shard_trie(self, policy_index=0):
         trie = shardtrie.ShardTrie()
         errors = []
         for extra_node in self.get_extra_shard_nodes():
             trie.add(extra_node[0], timestamp=extra_node[1],
                      flag=extra_node[2])
         for obj in self.list_objects_iter(
-                storage_policy_index=data['storage_policy_index']):
+                CONTAINER_LISTING_LIMIT, '', '', '', '',
+                storage_policy_index=policy_index):
             try:
                 data = dict(size=obj[2], content_type=obj[3], etag=obj[4])
                 trie.add(obj[0], timestamp=obj[1], data=data)
