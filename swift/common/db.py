@@ -328,6 +328,8 @@ class DatabaseBroker(object):
             exc_hint = 'malformed'
         elif 'file is encrypted or is not a database' in str(exc_value):
             exc_hint = 'corrupted'
+        elif 'disk I/O error' in str(exc_value):
+            exc_hint = 'I/O error on'
         else:
             raise exc_type, exc_value, exc_traceback
         prefix_path = os.path.dirname(self.db_dir)
@@ -356,7 +358,8 @@ class DatabaseBroker(object):
             if self.db_file != ':memory:' and os.path.exists(self.db_file):
                 try:
                     self.conn = get_db_connection(self.db_file, self.timeout)
-                except (sqlite3.DatabaseError, DatabaseConnectionError):
+                except (sqlite3.DatabaseError, DatabaseConnectionError,
+                        sqlite3.OperationalError):
                     self.possibly_quarantine(*sys.exc_info())
             else:
                 raise DatabaseConnectionError(self.db_file, "DB doesn't exist")
@@ -366,7 +369,7 @@ class DatabaseBroker(object):
             yield conn
             conn.rollback()
             self.conn = conn
-        except sqlite3.DatabaseError:
+        except (sqlite3.DatabaseError, sqlite3.OperationalError):
             try:
                 conn.close()
             except Exception:

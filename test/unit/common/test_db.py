@@ -27,7 +27,7 @@ import sqlite3
 import itertools
 import time
 import random
-from mock import patch, MagicMock
+from mock import patch, MagicMock, Mock
 
 from eventlet.timeout import Timeout
 
@@ -771,6 +771,22 @@ class TestDatabaseBroker(unittest.TestCase):
                 str(exc),
                 'Quarantined %s to %s due to corrupted database' %
                 (dbpath, qpath))
+
+            # Test sqlite3.OperationalError I/O Error
+            error = sqlite3.OperationalError('disk I/O error')
+            mock_db_connection = Mock(side_effect=error)
+            with patch('swift.common.db.get_db_connection',
+                       mock_db_connection):
+                try:
+                    with broker.get():
+                        pass
+                except Exception as err:
+                    exc = err
+                self.assertEquals(
+                str(exc),
+                'Quarantined %s to %s due to I/O error on database' %
+                (dbpath, qpath))
+
 
     def test_lock(self):
         broker = DatabaseBroker(os.path.join(self.testdir, '1.db'), timeout=.1)
