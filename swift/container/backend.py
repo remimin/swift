@@ -452,7 +452,7 @@ class ContainerBroker(DatabaseBroker):
                 trie, _errors = self.build_shard_trie(
                     data['storage_policy_index'])
                 self.shard_trie = trie
-                data['shardtrie'] = trie.dump()
+                data['shardtrie'] = trie.dump_to_json()
             return data
 
     def build_shard_trie(self, policy_index=0):

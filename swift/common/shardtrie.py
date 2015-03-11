@@ -17,6 +17,7 @@
 
 import time
 from swift.common.utils import Timestamp
+import json
 
 EMPTY = 0
 DATA_PRESENT = 1
@@ -45,29 +46,65 @@ class ShardTrieException(Exception):
 
 class Node():
     def __init__(self, key, parent=None, level=1):
-        self.key = key
-        self.data = None
-        self.timestamp = None
-        self.flag = EMPTY
-        self.parent = parent
-        self.children = dict()
-        self.level = level
+        self._key = key
+        self._data = None
+        self._timestamp = None
+        self._flag = EMPTY
+        self._parent = parent
+        self._children = dict()
+        self._level = level
 
     @property
-    def Key(self):
-        return self.key
+    def key(self):
+        return self._key
+
+    @key.setter
+    def key(self, key):
+        self._key = key
 
     @property
-    def Data(self):
-        return self.data
+    def data(self):
+        return self._data
+
+    @data.setter
+    def data(self, data):
+        self._data = data
 
     @property
-    def Timestamp(self):
-        return self.timestamp
+    def timestamp(self):
+        return self._timestamp
+
+    @timestamp.setter
+    def timestamp(self, ts):
+        self._timestamp = ts
 
     @property
-    def Flag(self):
-        return self.flag
+    def flag(self):
+        return self._flag
+
+    @flag.setter
+    def flag(self, flag):
+        self._flag = flag
+
+    @property
+    def parent(self):
+        return self._parent
+
+    @parent.setter
+    def parent(self, parent):
+        self._parent = parent
+
+    @property
+    def children(self):
+        return self._children
+
+    @children.setter
+    def children(self, children):
+        self._children = children
+
+    @property
+    def level(self):
+        return self._level
 
     def has_data(self):
         return self.flag == DATA_PRESENT
@@ -83,7 +120,7 @@ class Node():
         new_node.timestamp = Timestamp(time.time()).internal
         new_node.flag = DISTRIBUTED_BRANCH
         self.parent.children[self.key] = new_node
-        self.parent = None
+        self._parent = None
         return self
 
     def __iter__(self):
@@ -107,7 +144,7 @@ class Node():
             timestamp = Timestamp(time.time()).internal
         if self.flag == DISTRIBUTED_BRANCH:
             raise ShardTrieDistributedBranchException(
-                "Subtree '%s' has been distributed." % (self.key), self.key,
+                "Subtree '%s' has been distributed." % self.key, self.key,
                 self)
         elif self.key == key:
             self.timestamp = timestamp
@@ -159,7 +196,7 @@ class Node():
                 self.flag = EMPTY
                 self.timestamp = None
                 self.children = None
-                self.parent = None
+                self._parent = None
             return True
         elif key_len < len(key):
             next_key = key[:key_len + 1]
@@ -206,9 +243,17 @@ class ShardTrie():
     def root(self):
         return self._root
 
+    @root.setter
+    def root(self, root):
+        self._root = root
+
     @property
     def root_key(self):
         return self._root.key
+
+    @root_key.setter
+    def root_key(self, root_key):
+        self._root_key = root_key
 
     def __iter__(self):
         for node in self._root:
@@ -315,6 +360,9 @@ class ShardTrie():
     def dump(self):
         return self._root.dump()
 
+    def dump_to_json(self):
+        return json.dumps(self.dump())
+
     def trim_trunk(self):
         if len(self._root.children) >= 0 and len(self._root.children) != 1:
             return
@@ -353,6 +401,10 @@ class ShardTrie():
             node.children[child_node._root.key].parent = node
 
         return ShardTrie(root_node=node)
+
+    @staticmethod
+    def load_from_json(json_string):
+        ShardTrie.load(json.loads(json_string))
 
     def get_large_subtries(self, count=30):
         results = []

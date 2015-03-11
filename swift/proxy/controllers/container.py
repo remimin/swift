@@ -208,9 +208,11 @@ class ContainerController(Controller):
         """Handler for HTTP GET/HEAD requests."""
         if not self.account_info(self.account_name, req)[1]:
             return HTTPNotFound(request=req)
-        container_info = self.container_info(self.account_name,
-                                             self.container_name)
-        if is_container_sharded(container_info):
+        if not req.environ.get('swift.req_info'):
+            container_info = self.container_info(self.account_name,
+                                                 self.container_name, req)
+        if container_info and is_container_sharded(container_info) and \
+                not req.environ.get('swift.req_info'):
             resp = self.GETorHEAD_sharded(req, container_info)
         else:
             part = self.app.container_ring.get_part(
