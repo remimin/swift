@@ -404,7 +404,7 @@ class ShardTrie():
 
     @staticmethod
     def load_from_json(json_string):
-        ShardTrie.load(json.loads(json_string))
+        return ShardTrie.load(json.loads(json_string))
 
     def get_large_subtries(self, count=30):
         results = []

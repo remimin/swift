@@ -22,7 +22,7 @@ from itertools import chain
 from swift.common.utils import public, csv_append, Timestamp, \
     is_container_sharded, config_true_value
 from swift.common.constraints import check_metadata
-from swift.common import constraints, wsgi
+from swift.common import constraints, wsgi, shardtrie
 from swift.common.http import HTTP_ACCEPTED, is_success
 from swift.common.request_helpers import get_listing_content_type, \
     get_container_shard_path, get_sys_meta_prefix
@@ -90,6 +90,11 @@ class ContainerController(Controller):
         # TODO: build a new respose, loop through the tree. But first need utils
         # to generate the account name and container name etc.
         trie = container_info.get('shardtrie')
+        try:
+            # Attempt to generate shardtrie from json
+            trie = shardtrie.ShardTrie.load_from_json(trie)
+        except Exception:
+            trie = None
         if not trie:
             return HTTPServerError("Failed to build shardtrie")
 
@@ -208,6 +213,7 @@ class ContainerController(Controller):
         """Handler for HTTP GET/HEAD requests."""
         if not self.account_info(self.account_name, req)[1]:
             return HTTPNotFound(request=req)
+        container_info = None
         if not req.environ.get('swift.req_info'):
             container_info = self.container_info(self.account_name,
                                                  self.container_name, req)

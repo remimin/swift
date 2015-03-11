@@ -166,7 +166,7 @@ def headers_to_container_info(headers, status_int=HTTP_OK):
         'versions': headers.get('x-versions-location'),
         'storage_policy': headers.get('X-Backend-Storage-Policy-Index'.lower(),
                                       '0'),
-        'shardtrie': headers.get('X-Backend-Shardtrie', ''),
+        'shardtrie': headers.get('x-backend-shardtrie', ''),
         'cors': {
             'allow_origin': meta.get('access-control-allow-origin'),
             'expose_headers': meta.get('access-control-expose-headers'),
