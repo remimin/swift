@@ -287,7 +287,7 @@ class ShardTrie():
                 if n.has_data():
                     yield n
 
-    def get_distributed_nodes(self, key=None):
+    def get_distributed_nodes(self, key=None, limit=None, marker=None, **kargs):
         """Generator returning distributed tree nodes in the tree.
 
         :param key: The key pointing to the part of the tree to start the
@@ -303,7 +303,7 @@ class ShardTrie():
                 if n.is_distributed():
                     yield n
 
-    def get_important_nodes(self, key=None, limit=None, marker=None):
+    def get_important_nodes(self, key=None, limit=None, marker=None, **kargs):
         """Generator returning but the data and distributed nodes in the tree.
 
         :param key: The key pointing to the part of the tree to start the

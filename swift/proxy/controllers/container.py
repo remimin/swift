@@ -102,22 +102,26 @@ class ContainerController(Controller):
 
         responses = list()
         iterator_func = 'get_important_nodes'
-        if req.mehod == "HEAD":
+        if req.method == "HEAD":
             iterator_func = 'get_distributed_nodes'
 
         def _run_single_request(account_name, container_name):
             part = self.app.container_ring.get_part(
                 account_name, container_name)
+            if not req.environ.get('swift.skip_sharded'):
+                req.environ['swift.skip_sharded'] = True
 
-            path = '/v1/%s/%s' % (account_name, container_name)
+            path = '/%s/%s' % (account_name, container_name)
             tmp_resp = self.GETorHEAD_base(
                 req, _('Container'), self.app.container_ring, part, path)
+
+            req.environ['swift.skip_sharded'] = False
             return tmp_resp
 
         def _get_nodes_from_trie(shard_trie):
             resps = list()
             objects = list()
-            for node in getattr(shard_trie,  iterator_func)():
+            for node in getattr(shard_trie,  iterator_func)(**req.str_params):
                 if node.is_distributed():
                     acct, cont = get_container_shard_path(self.account_name,
                                                           self.container_name,
@@ -127,17 +131,22 @@ class ContainerController(Controller):
                     #    return HTTPServerError('failed')
                     responses.append(resp)
                     cont_info = self.container_info(acct, cont)
-                    tmp_resps, tmp_obs = _get_nodes_from_trie(
-                        cont_info.get('shardtrie'))
+                    try:
+                        # Attempt to generate shardtrie from json
+                        new_trie = shardtrie.ShardTrie.\
+                            load_from_json(cont_info['shardtrie'])
+                    except Exception:
+                        new_trie = None
+                    tmp_resps, tmp_obs = _get_nodes_from_trie(new_trie)
                     resps.extend(tmp_resps)
                     objects.extend(tmp_obs)
                 else:
                     # is a data node
                     obj = dict(
-                        hash=node.data['data']['etag'],
-                        bytes=node.data['data']['size'],
-                        content_type=node.data['data']['content_type'],
-                        last_modified=node.data['timestamp'],
+                        hash=node.data['etag'],
+                        bytes=node.data['size'],
+                        content_type=node.data['content_type'],
+                        last_modified=node.timestamp,
                         name=node.key
                     )
                     if 'json' in listing_content_type:
@@ -218,7 +227,8 @@ class ContainerController(Controller):
             container_info = self.container_info(self.account_name,
                                                  self.container_name, req)
         if container_info and is_container_sharded(container_info) and \
-                not req.environ.get('swift.req_info'):
+                not req.environ.get('swift.req_info') and \
+                not req.environ.get('swift.skip_sharded'):
             resp = self.GETorHEAD_sharded(req, container_info)
         else:
             part = self.app.container_ring.get_part(

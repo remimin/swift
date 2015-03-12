@@ -200,7 +200,10 @@ class ObjectController(Controller):
             return self._get_shard_node(new_trie, cont_info)
 
     def _find_shard_path(self, container_info):
-        trie = container_info['shardtrie']
+        try:
+            trie = shardtrie.ShardTrie.load_from_json(container_info['shardtrie'])
+        except:
+            trie = shardtrie.ShardTrie()
         prefix, container_info = self._get_shard_node(trie, container_info)
         if prefix:
             acct, cont = get_container_shard_path(self.account_name,
