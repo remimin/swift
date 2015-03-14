@@ -63,7 +63,7 @@ from swift.proxy.controllers.base import Controller, delay_denial, \
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
     HTTPPreconditionFailed, HTTPRequestEntityTooLarge, HTTPRequestTimeout, \
     HTTPServerError, HTTPServiceUnavailable, Request, HeaderKeyDict, \
-    HTTPClientDisconnect, HTTPUnprocessableEntity
+    HTTPClientDisconnect, HTTPUnprocessableEntity, HTTPException
 from swift.common.request_helpers import is_sys_or_user_meta, is_sys_meta, \
     remove_items, copy_header_subset
 
@@ -796,6 +796,355 @@ class BaseObjectController(Controller):
             chunk_index[p] = hole
         return chunk_index
 
+    def _update_content_type(self, req):
+        # Sometimes the 'content-type' header exists, but is set to None.
+        req.content_type_manually_set = True
+        detect_content_type = \
+            config_true_value(req.headers.get('x-detect-content-type'))
+        if detect_content_type or not req.headers.get('content-type'):
+            guessed_type, _junk = mimetypes.guess_type(req.path_info)
+            req.headers['Content-Type'] = guessed_type or \
+                'application/octet-stream'
+            if detect_content_type:
+                req.headers.pop('x-detect-content-type')
+            else:
+                req.content_type_manually_set = False
+
+    def _update_x_timestamp(self, req, policy_index):
+        # Used by container sync feature
+        if 'x-timestamp' in req.headers:
+            try:
+                req_timestamp = Timestamp(req.headers['X-Timestamp'])
+            except ValueError:
+                raise HTTPBadRequest(
+                    request=req, content_type='text/plain',
+                    body='X-Timestamp should be a UNIX timestamp float value; '
+                         'was %r' % req.headers['x-timestamp'])
+            req.headers['X-Timestamp'] = req_timestamp.internal
+        else:
+            req.headers['X-Timestamp'] = Timestamp(time.time()).internal
+        return None
+
+    def _make_copy_request(self, req):
+        if req.environ.get('swift.orig_req_method', req.method) != 'POST':
+            req.environ.setdefault('swift.log_info', []).append(
+                'x-copy-from:%s' % req.headers['X-Copy-From'])
+        ver, acct, _rest = req.split_path(2, 3, True)
+        src_account_name = req.headers.get('X-Copy-From-Account', None)
+        if src_account_name:
+            src_account_name = check_account_format(req, src_account_name)
+        else:
+            src_account_name = acct
+        src_container_name, src_obj_name = check_copy_from_header(req)
+        source_header = '/%s/%s/%s/%s' % (
+            ver, src_account_name, src_container_name, src_obj_name)
+        source_req = req.copy_get()
+
+        # make sure the source request uses it's container_info
+        source_req.headers.pop('X-Backend-Storage-Policy-Index', None)
+        source_req.path_info = source_header
+        source_req.headers['X-Newest'] = 'true'
+
+        orig_obj_name = self.object_name
+        orig_container_name = self.container_name
+        orig_account_name = self.account_name
+        self.object_name = src_obj_name
+        self.container_name = src_container_name
+        self.account_name = src_account_name
+        sink_req = Request.blank(req.path_info,
+                                 environ=req.environ, headers=req.headers)
+        try:
+            source_resp = self.GET(source_req)
+            sink_req.headers['etag'] = source_resp.etag
+
+            # This gives middlewares a way to change the source; for example,
+            # this lets you COPY a SLO manifest and have the new object be the
+            # concatenation of the segments (like what a GET request gives
+            # the client), not a copy of the manifest file.
+            hook = req.environ.get(
+                'swift.copy_hook',
+                (lambda source_req, source_resp, sink_req: source_resp))
+            source_resp = hook(source_req, source_resp, sink_req)
+        finally:
+            self.object_name = orig_obj_name
+            self.container_name = orig_container_name
+            self.account_name = orig_account_name
+        return sink_req, source_resp
+
+    def _make_copy_context(self, req, new_req, source_resp):
+        data_source = iter(source_resp.app_iter)
+        new_req.content_length = source_resp.content_length
+        new_req.etag = source_resp.etag
+
+        # we no longer need the X-Copy-From header
+        del new_req.headers['X-Copy-From']
+        if 'X-Copy-From-Account' in new_req.headers:
+            del new_req.headers['X-Copy-From-Account']
+        if not req.content_type_manually_set:
+            new_req.headers['Content-Type'] = \
+                source_resp.headers['Content-Type']
+        if config_true_value(
+                new_req.headers.get('x-fresh-metadata', 'false')):
+            # post-as-copy: ignore new sysmeta, copy existing sysmeta
+            condition = lambda k: is_sys_meta('object', k)
+            remove_items(new_req.headers, condition)
+            copy_header_subset(source_resp, new_req, condition)
+        else:
+            # copy/update existing sysmeta and user meta
+            copy_headers_into(source_resp, new_req)
+            copy_headers_into(req, new_req)
+
+        # copy over x-static-large-object for POSTs and manifest copies
+        if 'X-Static-Large-Object' in source_resp.headers and \
+                req.params.get('multipart-manifest') == 'get':
+            new_req.headers['X-Static-Large-Object'] = \
+                source_resp.headers['X-Static-Large-Object']
+
+        def update_response(req, resp):
+            acct, path = source_resp.environ['PATH_INFO'].split('/', 3)[2:4]
+            resp.headers['X-Copied-From-Account'] = quote(acct)
+            resp.headers['X-Copied-From'] = quote(path)
+            if 'last-modified' in source_resp.headers:
+                resp.headers['X-Copied-From-Last-Modified'] = \
+                    source_resp.headers['last-modified']
+            copy_headers_into(req, resp)
+            return resp
+
+        return new_req, data_source, update_response
+
+    def _get_put_connections(self, req, nodes, partition, outgoing_headers,
+                             policy, obj_ring):
+        node_iter = GreenthreadSafeIterator(
+            self.iter_nodes_local_first(obj_ring, partition))
+        pile = GreenPile(len(nodes))
+
+        for nheaders in outgoing_headers:
+            if not policy.stores_objects_verbatim:
+                # the object server will get different bytes, so these
+                # values do not apply (Content-Length might, in general, but
+                # in the specific case of replication vs. EC, it doesn't).
+                nheaders.pop('Content-Length', None)
+                nheaders.pop('Etag', None)
+            # RFC2616:8.2.3 disallows 100-continue without a body
+            if (int(nheaders.get('content-length', 0)) > 0) or req.is_chunked:
+                nheaders['Expect'] = '100-continue'
+            pile.spawn(
+                self._connect_put_node, node_iter, partition,
+                req.swift_entity_path, nheaders,
+                self.app.logger.thread_locals, req.is_chunked,
+                need_metadata_footer=policy.needs_trailing_object_metadata,
+                need_multiphase_put=policy.needs_multiphase_put)
+
+        putters = []
+        chunk_hashers = [None] * len(nodes)
+        for i, p in enumerate(pile):
+            if p:
+                putters.append(p)
+                p.hshr_index = i
+                chunk_hashers[p.hshr_index] = (
+                    None if policy.stores_objects_verbatim else md5())
+        return chunk_hashers, putters
+
+    def _check_min_putters(self, req, putters, min_puts, msg=None):
+        msg = msg or 'Object PUT returning 503, %(conns)s/%(nodes)s ' \
+            'required connections'
+        if len(putters) < min_puts:
+            self.app.logger.error((msg),
+                                  {'conns': len(putters), 'nodes': min_puts})
+            raise HTTPServiceUnavailable(request=req)
+
+    def _transfer_data(self, req, data_source, chunk_hashers, putters, nodes,
+                       policy, etag_hasher, min_puts):
+
+        statuses = [p.current_status() for p in putters]
+        if (req.if_none_match is not None
+                and '*' in req.if_none_match
+                and HTTP_PRECONDITION_FAILED in statuses):
+            # If we find any copy of the file, it shouldn't be uploaded
+            self.app.logger.debug(
+                _('Object PUT returning 412, %(statuses)r'),
+                {'statuses': statuses})
+            raise HTTPPreconditionFailed(request=req)
+
+        if HTTP_CONFLICT in statuses:
+            timestamps = [HeaderKeyDict(p.resp.getheaders()).get(
+                'X-Backend-Timestamp') for p in putters if p.resp]
+            self.app.logger.debug(
+                _('Object PUT returning 202 for 409: '
+                  '%(req_timestamp)s <= %(timestamps)r'),
+                {'req_timestamp': req.timestamp.internal,
+                 'timestamps': ', '.join(timestamps)})
+            raise HTTPAccepted(request=req)
+
+        self._check_min_putters(req, putters, min_puts)
+
+        bytes_transferred = 0
+        chunk_transform = policy.chunk_transformer(len(nodes))
+        chunk_transform.send(None)
+
+        def send_chunk(chunk):
+            if etag_hasher:
+                etag_hasher.update(chunk)
+            backend_chunks = chunk_transform.send(chunk)
+            if backend_chunks is None:
+                # If there's not enough bytes buffered for erasure-encoding
+                # or whatever we're doing, the transform will give us None.
+                return
+
+            for putter in list(putters):
+                backend_chunk = backend_chunks[chunk_index[putter]]
+                if not putter.failed:
+                    if chunk_hashers[putter.hshr_index]:
+                        chunk_hashers[putter.hshr_index].update(backend_chunk)
+                    putter.send_chunk(backend_chunk)
+                else:
+                    putters.remove(putter)
+            self._check_min_putters(
+                req, putters, min_puts, msg='Object PUT exceptions during'
+                ' send, %(conns)s/%(nodes)s required connections')
+
+        final_phase = True
+        need_quorum = True
+        min_responses = min_puts
+        need_multiphase_put = policy.needs_multiphase_put
+        try:
+            with ContextPool(len(putters)) as pool:
+
+                # build our chunk index dict to place handoffs in the
+                # same part nodes index as the primaries they are covering
+                chunk_index = self._determine_chunk_destinations(putters)
+
+                for putter in putters:
+                    putter.spawn_sender_greenthread(
+                        pool, self.app.put_queue_depth, self.app.node_timeout,
+                        self.app.exception_occurred)
+                while True:
+                    with ChunkReadTimeout(self.app.client_timeout):
+                        try:
+                            chunk = next(data_source)
+                        except StopIteration:
+                            computed_etag = (etag_hasher.hexdigest()
+                                             if etag_hasher else None)
+                            received_etag = req.headers.get(
+                                'etag', '').strip('"')
+                            if (computed_etag and received_etag and
+                               computed_etag != received_etag):
+                                raise HTTPUnprocessableEntity(request=req)
+
+                            send_chunk('')  # flush out any buffered data
+
+                            for putter in putters:
+                                trail_md = policy.trailing_metadata(
+                                    etag_hasher, bytes_transferred,
+                                    chunk_index[putter])
+                                if not policy.stores_objects_verbatim:
+                                    trail_md['Etag'] = chunk_hashers[
+                                        putter.hshr_index].hexdigest()
+                                putter.end_of_object_data(
+                                    need_multiphase_put, trail_md)
+                            break
+                    bytes_transferred += len(chunk)
+                    if bytes_transferred > constraints.MAX_FILE_SIZE:
+                        raise HTTPRequestEntityTooLarge(request=req)
+
+                    send_chunk(chunk)
+
+                for putter in putters:
+                    putter.wait()
+
+                if need_multiphase_put:
+                    # for storage policies requiring 2-phase commit (e.g.
+                    # erasure coding), enforce >= 'quorum' number of
+                    # 100-continue responses - this indicates successful
+                    # object data and metadata commit and is a necessary
+                    # condition to be met before starting 2nd PUT phase
+                    final_phase = False
+                    statuses, reasons, bodies, _junk, quorum = \
+                        self._get_put_responses(
+                            req, putters, len(nodes), final_phase,
+                            min_responses, need_quorum=need_quorum)
+                    if quorum:
+                        # quorum achieved, start 2nd phase - send commit
+                        # confirmation to participating object servers
+                        # so they write a .durable state file indicating
+                        # a successful PUT
+                        for putter in putters:
+                            putter.send_commit_confirmation()
+                    else:
+                        self.app.logger.error(
+                            _('Not enough object servers ack\'ed (got %d)'),
+                            statuses.count(HTTP_CONTINUE))
+                        raise HTTPServerError(request=req)
+                    for putter in putters:
+                        putter.wait()
+                    final_phase = True
+                    need_quorum = False
+                    min_responses = 2
+
+            putters = [p for p in putters if not p.failed]
+        except ChunkReadTimeout as err:
+            self.app.logger.warn(
+                _('ERROR Client read timeout (%ss)'), err.seconds)
+            self.app.logger.increment('client_timeouts')
+            raise HTTPRequestTimeout(request=req)
+        except HTTPException:
+            raise
+        except (Exception, Timeout):
+            self.app.logger.exception(
+                _('ERROR Exception causing client disconnect'))
+            raise HTTPClientDisconnect(request=req)
+        if req.content_length and bytes_transferred < req.content_length:
+            req.client_disconnect = True
+            self.app.logger.warn(
+                _('Client disconnected without sending enough data'))
+            self.app.logger.increment('client_disconnects')
+            raise HTTPClientDisconnect(request=req)
+
+        return final_phase, min_responses, need_quorum, putters
+
+    def _store_object(
+            self, req, data_source, obj_ring, policy,
+            nodes, partition,
+            containers, container_partition,
+            delete_at_nodes, delete_at_container, delete_at_part):
+
+        # If the request body sent from client -> proxy is the same as the
+        # request body sent proxy -> object, then we can rely on the object
+        # server to handle any Etag checking. If not, we have to do it here.
+        etag_hasher = None if policy.stores_objects_verbatim else md5()
+        min_puts = policy.quorum_size(len(nodes))
+
+        outgoing_headers = self._backend_requests(
+            req, len(nodes), container_partition, containers,
+            delete_at_container, delete_at_part, delete_at_nodes)
+
+        chunk_hashers, putters = self._get_put_connections(
+            req, nodes, partition, outgoing_headers, policy, obj_ring)
+
+        try:
+            final_phase, min_resp, need_quorum, putters = self._transfer_data(
+                req, data_source, chunk_hashers, putters, nodes,
+                policy, etag_hasher, min_puts)
+            statuses, reasons, bodies, etags, _junk = self._get_put_responses(
+                req, putters, len(nodes), final_phase, min_resp,
+                need_quorum=need_quorum)
+        except HTTPException as resp:
+            return resp
+
+        if len(etags) > 1 and policy.stores_objects_verbatim:
+            self.app.logger.error(
+                _('Object servers returned %s mismatched etags'), len(etags))
+            return HTTPServerError(request=req)
+        etag = etags.pop() if len(etags) else None
+        if not policy.stores_objects_verbatim and etag_hasher:
+            etag = etag_hasher.hexdigest()
+        resp = self.best_response(req, statuses, reasons, bodies,
+                                  _('Object PUT'), etag=etag,
+                                  quorum_size=min_puts)
+        resp.last_modified = math.ceil(
+            float(Timestamp(req.headers['X-Timestamp'])))
+        return resp
+
     @public
     @cors_validation
     @delay_denial
@@ -827,23 +1176,14 @@ class BaseObjectController(Controller):
         if not containers:
             return HTTPNotFound(request=req)
 
-        # Sometimes the 'content-type' header exists, but is set to None.
-        content_type_manually_set = True
-        detect_content_type = \
-            config_true_value(req.headers.get('x-detect-content-type'))
-        if detect_content_type or not req.headers.get('content-type'):
-            guessed_type, _junk = mimetypes.guess_type(req.path_info)
-            req.headers['Content-Type'] = guessed_type or \
-                'application/octet-stream'
-            if detect_content_type:
-                req.headers.pop('x-detect-content-type')
-            else:
-                content_type_manually_set = False
+        self._update_content_type(req)
 
         error_response = check_object_creation(req, self.object_name) or \
             check_content_type(req)
         if error_response:
             return error_response
+
+        self._update_x_timestamp(req, policy_index)
 
         partition, nodes = obj_ring.get_nodes(
             self.account_name, self.container_name, self.object_name)
@@ -859,19 +1199,6 @@ class BaseObjectController(Controller):
             hresp = self.GETorHEAD_base(
                 hreq, _('Object'), hnode_iter, partition,
                 hreq.swift_entity_path)
-
-        # Used by container sync feature
-        if 'x-timestamp' in req.headers:
-            try:
-                req_timestamp = Timestamp(req.headers['X-Timestamp'])
-            except ValueError:
-                return HTTPBadRequest(
-                    request=req, content_type='text/plain',
-                    body='X-Timestamp should be a UNIX timestamp float value; '
-                         'was %r' % req.headers['x-timestamp'])
-            req.headers['X-Timestamp'] = req_timestamp.internal
-        else:
-            req.headers['X-Timestamp'] = Timestamp(time.time()).internal
 
         if object_versions and not req.environ.get('swift_versioned_copy'):
             is_manifest = 'X-Object-Manifest' in req.headers or \
@@ -906,312 +1233,37 @@ class BaseObjectController(Controller):
                     # could not copy the data, bail
                     return HTTPServiceUnavailable(request=req)
 
-        reader = req.environ['wsgi.input'].read
-        data_source = iter(lambda: reader(self.app.client_chunk_size), '')
         source_header = req.headers.get('X-Copy-From')
         source_resp = None
         if source_header:
-            if req.environ.get('swift.orig_req_method', req.method) != 'POST':
-                req.environ.setdefault('swift.log_info', []).append(
-                    'x-copy-from:%s' % source_header)
-            ver, acct, _rest = req.split_path(2, 3, True)
-            src_account_name = req.headers.get('X-Copy-From-Account', None)
-            if src_account_name:
-                src_account_name = check_account_format(req, src_account_name)
-            else:
-                src_account_name = acct
-            src_container_name, src_obj_name = check_copy_from_header(req)
-            source_header = '/%s/%s/%s/%s' % (
-                ver, src_account_name, src_container_name, src_obj_name)
-            source_req = req.copy_get()
-
-            # make sure the source request uses it's container_info
-            source_req.headers.pop('X-Backend-Storage-Policy-Index', None)
-            source_req.path_info = source_header
-            source_req.headers['X-Newest'] = 'true'
-            orig_obj_name = self.object_name
-            orig_container_name = self.container_name
-            orig_account_name = self.account_name
-            self.object_name = src_obj_name
-            self.container_name = src_container_name
-            self.account_name = src_account_name
-            sink_req = Request.blank(req.path_info,
-                                     environ=req.environ, headers=req.headers)
-            source_resp = self.GET(source_req)
-            sink_req.headers['etag'] = source_resp.etag
-
-            # This gives middlewares a way to change the source; for example,
-            # this lets you COPY a SLO manifest and have the new object be the
-            # concatenation of the segments (like what a GET request gives
-            # the client), not a copy of the manifest file.
-            hook = req.environ.get(
-                'swift.copy_hook',
-                (lambda source_req, source_resp, sink_req: source_resp))
-            source_resp = hook(source_req, source_resp, sink_req)
+            new_req, source_resp = self._make_copy_request(req)
 
             if source_resp.status_int >= HTTP_MULTIPLE_CHOICES:
                 return source_resp
-            self.object_name = orig_obj_name
-            self.container_name = orig_container_name
-            self.account_name = orig_account_name
-            data_source = iter(source_resp.app_iter)
-            sink_req.content_length = source_resp.content_length
-            if sink_req.content_length is None:
+            if source_resp.content_length is None:
                 # This indicates a transfer-encoding: chunked source object,
                 # which currently only happens because there are more than
                 # CONTAINER_LISTING_LIMIT segments in a segmented object. In
                 # this case, we're going to refuse to do the server-side copy.
                 return HTTPRequestEntityTooLarge(request=req)
-            if sink_req.content_length > constraints.MAX_FILE_SIZE:
+            if source_resp.content_length > constraints.MAX_FILE_SIZE:
                 return HTTPRequestEntityTooLarge(request=req)
-            sink_req.etag = source_resp.etag
-
-            # we no longer need the X-Copy-From header
-            del sink_req.headers['X-Copy-From']
-            if 'X-Copy-From-Account' in sink_req.headers:
-                del sink_req.headers['X-Copy-From-Account']
-            if not content_type_manually_set:
-                sink_req.headers['Content-Type'] = \
-                    source_resp.headers['Content-Type']
-            if config_true_value(
-                    sink_req.headers.get('x-fresh-metadata', 'false')):
-                # post-as-copy: ignore new sysmeta, copy existing sysmeta
-                condition = lambda k: is_sys_meta('object', k)
-                remove_items(sink_req.headers, condition)
-                copy_header_subset(source_resp, sink_req, condition)
-            else:
-                # copy/update existing sysmeta and user meta
-                copy_headers_into(source_resp, sink_req)
-                copy_headers_into(req, sink_req)
-
-            # copy over x-static-large-object for POSTs and manifest copies
-            if 'X-Static-Large-Object' in source_resp.headers and \
-                    req.params.get('multipart-manifest') == 'get':
-                sink_req.headers['X-Static-Large-Object'] = \
-                    source_resp.headers['X-Static-Large-Object']
-
-            req = sink_req
+            req, data_source, update_response = self._make_copy_context(
+                req, new_req, source_resp)
+        else:
+            reader = req.environ['wsgi.input'].read
+            data_source = iter(lambda: reader(self.app.client_chunk_size), '')
+            update_response = lambda req, resp: resp
 
         req, delete_at_container, delete_at_part, \
             delete_at_nodes = self._config_obj_expiration(req)
 
-        node_iter = GreenthreadSafeIterator(
-            self.iter_nodes_local_first(obj_ring, partition))
-        pile = GreenPile(len(nodes))
-        te = req.headers.get('transfer-encoding', '')
-        chunked = ('chunked' in te)
-
-        # If the request body sent from client -> proxy is the same as the
-        # request body sent proxy -> object, then we can rely on the object
-        # server to handle any Etag checking. If not, we have to do it here.
-        etag_hasher = None if policy.stores_objects_verbatim else md5()
-
-        outgoing_headers = self._backend_requests(
-            req, len(nodes), container_partition, containers,
-            delete_at_container, delete_at_part, delete_at_nodes)
-
-        for nheaders in outgoing_headers:
-            if not policy.stores_objects_verbatim:
-                # the object server will get different bytes, so these
-                # values do not apply (Content-Length might, in general, but
-                # in the specific case of replication vs. EC, it doesn't).
-                nheaders.pop('Content-Length', None)
-                nheaders.pop('Etag', None)
-            # RFC2616:8.2.3 disallows 100-continue without a body
-            if (int(nheaders.get('content-length', 0)) > 0) or chunked:
-                nheaders['Expect'] = '100-continue'
-            pile.spawn(
-                self._connect_put_node, node_iter, partition,
-                req.swift_entity_path, nheaders,
-                self.app.logger.thread_locals, chunked,
-                need_metadata_footer=policy.needs_trailing_object_metadata,
-                need_multiphase_put=policy.needs_multiphase_put)
-
-        min_puts = policy.quorum_size(len(nodes))
-        putters = []
-        chunk_hashers = [None] * len(nodes)
-        for i, p in enumerate(pile):
-            if p:
-                putters.append(p)
-                p.hshr_index = i
-                chunk_hashers[p.hshr_index] = (
-                    None if policy.stores_objects_verbatim else md5())
-
-        statuses = [p.current_status() for p in putters]
-        if (req.if_none_match is not None
-                and '*' in req.if_none_match
-                and HTTP_PRECONDITION_FAILED in statuses):
-            # If we find any copy of the file, it shouldn't be uploaded
-            self.app.logger.debug(
-                _('Object PUT returning 412, %(statuses)r'),
-                {'statuses': statuses})
-            return HTTPPreconditionFailed(request=req)
-
-        if HTTP_CONFLICT in statuses:
-            timestamps = [HeaderKeyDict(p.resp.getheaders()).get(
-                'X-Backend-Timestamp') for p in putters if p.resp]
-            self.app.logger.debug(
-                _('Object PUT returning 202 for 409: '
-                  '%(req_timestamp)s <= %(timestamps)r'),
-                {'req_timestamp': req.timestamp.internal,
-                 'timestamps': ', '.join(timestamps)})
-            return HTTPAccepted(request=req)
-
-        if len(putters) < min_puts:
-            self.app.logger.error(
-                _('Object PUT returning 503, %(conns)s/%(nodes)s '
-                  'required connections'),
-                {'conns': len(putters), 'nodes': min_puts})
-            return HTTPServiceUnavailable(request=req)
-
-        bytes_transferred = 0
-        chunk_transform = policy.chunk_transformer(len(nodes))
-        chunk_transform.send(None)
-
-        def send_chunk(chunk):
-            if etag_hasher:
-                etag_hasher.update(chunk)
-            backend_chunks = chunk_transform.send(chunk)
-            if backend_chunks is None:
-                # If there's not enough bytes buffered for erasure-encoding
-                # or whatever we're doing, the transform will give us None.
-                return
-
-            for putter in list(putters):
-                backend_chunk = backend_chunks[chunk_index[putter]]
-                if not putter.failed:
-                    if chunk_hashers[putter.hshr_index]:
-                        chunk_hashers[putter.hshr_index].update(backend_chunk)
-                    putter.send_chunk(backend_chunk)
-                else:
-                    putters.remove(putter)
-            if len(putters) < min_puts:
-                self.app.logger.error(_(
-                    'Object PUT exceptions during'
-                    ' send, %(conns)s/%(nodes)s required connections'),
-                    {'conns': len(putters), 'nodes': min_puts})
-                raise HTTPServiceUnavailable(request=req)
-
-        final_phase = True
-        need_quorum = True
-        min_responses = min_puts
-        need_multiphase_put = policy.needs_multiphase_put
-        try:
-            with ContextPool(len(putters)) as pool:
-
-                # build our chunk index dict to place handoffs in the
-                # same part nodes index as the primaries they are covering
-                chunk_index = self._determine_chunk_destinations(putters)
-
-                for putter in putters:
-                    putter.spawn_sender_greenthread(
-                        pool, self.app.put_queue_depth, self.app.node_timeout,
-                        self.app.exception_occurred)
-                while True:
-                    with ChunkReadTimeout(self.app.client_timeout):
-                        try:
-                            chunk = next(data_source)
-                        except StopIteration:
-                            computed_etag = (etag_hasher.hexdigest()
-                                             if etag_hasher else None)
-                            received_etag = req.headers.get(
-                                'etag', '').strip('"')
-                            if (computed_etag and received_etag and
-                               computed_etag != received_etag):
-                                return HTTPUnprocessableEntity(request=req)
-
-                            send_chunk('')  # flush out any buffered data
-
-                            for putter in putters:
-                                trail_md = policy.trailing_metadata(
-                                    etag_hasher, bytes_transferred,
-                                    chunk_index[putter])
-                                if not policy.stores_objects_verbatim:
-                                    trail_md['Etag'] = chunk_hashers[
-                                        putter.hshr_index].hexdigest()
-                                putter.end_of_object_data(
-                                    need_multiphase_put, trail_md)
-                            break
-                    bytes_transferred += len(chunk)
-                    if bytes_transferred > constraints.MAX_FILE_SIZE:
-                        return HTTPRequestEntityTooLarge(request=req)
-
-                    send_chunk(chunk)
-
-                for putter in putters:
-                    putter.wait()
-
-                if need_multiphase_put:
-                    # for storage policies requiring 2-phase commit (e.g.
-                    # erasure coding), enforce >= 'quorum' number of
-                    # 100-continue responses - this indicates successful
-                    # object data and metadata commit and is a necessary
-                    # condition to be met before starting 2nd PUT phase
-                    final_phase = False
-                    statuses, reasons, bodies, _junk, quorum = \
-                        self._get_put_responses(
-                            req, putters, len(nodes), final_phase,
-                            min_responses, need_quorum=need_quorum)
-                    if quorum:
-                        # quorum achieved, start 2nd phase - send commit
-                        # confirmation to participating object servers
-                        # so they write a .durable state file indicating
-                        # a successful PUT
-                        for putter in putters:
-                            putter.send_commit_confirmation()
-                    else:
-                        self.app.logger.error(
-                            _('Not enough object servers ack\'ed (got %d)'),
-                            statuses.count(HTTP_CONTINUE))
-                        return HTTPServerError(request=req)
-                    for putter in putters:
-                        putter.wait()
-                    final_phase = True
-                    need_quorum = False
-                    min_responses = 2
-
-            putters = [p for p in putters if not p.failed]
-        except ChunkReadTimeout as err:
-            self.app.logger.warn(
-                _('ERROR Client read timeout (%ss)'), err.seconds)
-            self.app.logger.increment('client_timeouts')
-            return HTTPRequestTimeout(request=req)
-        except (Exception, Timeout):
-            self.app.logger.exception(
-                _('ERROR Exception causing client disconnect'))
-            return HTTPClientDisconnect(request=req)
-        if req.content_length and bytes_transferred < req.content_length:
-            req.client_disconnect = True
-            self.app.logger.warn(
-                _('Client disconnected without sending enough data'))
-            self.app.logger.increment('client_disconnects')
-            return HTTPClientDisconnect(request=req)
-
-        statuses, reasons, bodies, etags, _junk = self._get_put_responses(
-            req, putters, len(nodes), final_phase, min_responses,
-            need_quorum=need_quorum)
-
-        if len(etags) > 1 and policy.stores_objects_verbatim:
-            self.app.logger.error(
-                _('Object servers returned %s mismatched etags'), len(etags))
-            return HTTPServerError(request=req)
-        etag = etags.pop() if len(etags) else None
-        if not policy.stores_objects_verbatim and etag_hasher:
-            etag = etag_hasher.hexdigest()
-        resp = self.best_response(req, statuses, reasons, bodies,
-                                  _('Object PUT'), etag=etag,
-                                  quorum_size=min_puts)
-        if source_header:
-            acct, path = source_header.split('/', 3)[2:4]
-            resp.headers['X-Copied-From-Account'] = quote(acct)
-            resp.headers['X-Copied-From'] = quote(path)
-            if 'last-modified' in source_resp.headers:
-                resp.headers['X-Copied-From-Last-Modified'] = \
-                    source_resp.headers['last-modified']
-            copy_headers_into(req, resp)
-        resp.last_modified = math.ceil(
-            float(Timestamp(req.headers['X-Timestamp'])))
-        return resp
+        resp = self._store_object(
+            req, data_source, obj_ring, policy,
+            nodes, partition,
+            containers, container_partition,
+            delete_at_nodes, delete_at_container, delete_at_part)
+        return update_response(req, resp)
 
     @public
     @cors_validation
