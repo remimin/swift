@@ -31,6 +31,7 @@ import random
 from eventlet import spawn, Timeout, listen
 import simplejson
 
+from swift import __version__ as swift_version
 from swift.common.swob import Request, HeaderKeyDict
 import swift.container
 from swift.container import server as container_server
@@ -312,6 +313,8 @@ class TestContainerController(unittest.TestCase):
             self.assertTrue(
                 verb in resp.headers['Allow'].split(', '))
         self.assertEquals(len(resp.headers['Allow'].split(', ')), 7)
+        self.assertEquals(resp.headers['Server'],
+                          (self.controller.server_type + '/' + swift_version))
 
     def test_PUT(self):
         req = Request.blank(
@@ -383,6 +386,8 @@ class TestContainerController(unittest.TestCase):
                                      policy.idx})
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 201)
+        self.assertEquals(resp.headers.get('X-Backend-Storage-Policy-Index'),
+                          str(policy.idx))
 
         # now make sure we read it back
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'GET'})
@@ -396,6 +401,8 @@ class TestContainerController(unittest.TestCase):
                             headers={'X-Timestamp': Timestamp(1).internal})
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 201)
+        self.assertEquals(resp.headers.get('X-Backend-Storage-Policy-Index'),
+                          str(POLICIES.default.idx))
 
         # now make sure the default was used (pol 1)
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'GET'})
@@ -411,6 +418,7 @@ class TestContainerController(unittest.TestCase):
         resp = req.get_response(self.controller)
         # make sure we get bad response
         self.assertEquals(resp.status_int, 400)
+        self.assertFalse('X-Backend-Storage-Policy-Index' in resp.headers)
 
     def test_PUT_no_policy_change(self):
         ts = (Timestamp(t).internal for t in itertools.count(time.time()))
@@ -468,6 +476,9 @@ class TestContainerController(unittest.TestCase):
             })
             resp = req.get_response(self.controller)
             self.assertEquals(resp.status_int, 409)
+            self.assertEquals(
+                resp.headers.get('X-Backend-Storage-Policy-Index'),
+                str(policy.idx))
 
         # and make sure there is no change!
         req = Request.blank('/sda1/p/a/c')
@@ -2592,7 +2603,7 @@ class TestContainerController(unittest.TestCase):
         self.assertEqual(
             self.controller.logger.log_dict['info'],
             [(('1.2.3.4 - - [01/Jan/1970:02:46:41 +0000] "HEAD /sda1/p/a/c" '
-             '404 - "-" "-" "-" 2.0000 "-" 1234',), {})])
+             '404 - "-" "-" "-" 2.0000 "-" 1234 0',), {})])
 
 
 @patch_policies([

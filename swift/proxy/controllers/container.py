@@ -51,7 +51,9 @@ class ContainerController(Controller):
         st = self.server_type.lower()
         return ['x-remove-%s-read' % st,
                 'x-remove-%s-write' % st,
-                'x-remove-versions-location']
+                'x-remove-versions-location',
+                'x-remove-%s-sync-key' % st,
+                'x-remove-%s-sync-to' % st]
 
     def _convert_policy_to_index(self, req):
         """
@@ -221,7 +223,12 @@ class ContainerController(Controller):
     def GETorHEAD(self, req):
         """Handler for HTTP GET/HEAD requests."""
         if not self.account_info(self.account_name, req)[1]:
+            if 'swift.authorize' in req.environ:
+                aresp = req.environ['swift.authorize'](req)
+                if aresp:
+                    return aresp
             return HTTPNotFound(request=req)
+
         container_info = None
         if not req.environ.get('swift.req_info'):
             container_info = self.container_info(self.account_name,
@@ -229,6 +236,10 @@ class ContainerController(Controller):
         if container_info and is_container_sharded(container_info) and \
                 not req.environ.get('swift.req_info') and \
                 not req.environ.get('swift.skip_sharded'):
+            # GETorHEAD_sharded still calls GETorHEAD_base, but seeing as
+            # it is sharded there will probably be more then 1 container,
+            # therefore needs to send more requests and find more then 1
+            # partition to pass GETorHEAD_base.
             resp = self.GETorHEAD_sharded(req, container_info)
         else:
             part = self.app.container_ring.get_part(
@@ -236,6 +247,7 @@ class ContainerController(Controller):
             resp = self.GETorHEAD_base(
                 req, _('Container'), self.app.container_ring, part,
                 req.swift_entity_path)
+
         if 'swift.authorize' in req.environ:
             req.acl = resp.headers.get('x-container-read')
             aresp = req.environ['swift.authorize'](req)

@@ -368,6 +368,11 @@ class TestConstraints(unittest.TestCase):
         self.assertTrue('X-Delete-At' in req.headers)
         self.assertEqual(req.headers['X-Delete-At'], expected)
 
+    def test_check_dir(self):
+        self.assertFalse(constraints.check_dir('', ''))
+        with mock.patch("os.path.isdir", MockTrue()):
+            self.assertTrue(constraints.check_dir('/srv', 'foo/bar'))
+
     def test_check_mount(self):
         self.assertFalse(constraints.check_mount('', ''))
         with mock.patch("swift.common.utils.ismount", MockTrue()):
@@ -499,6 +504,12 @@ class TestConstraints(unittest.TestCase):
         req = Request.blank(
             '/v/a/c/o',
             headers={'X-Copy-From-Account': 'account/with/slashes'})
+        self.assertRaises(HTTPException,
+                          constraints.check_account_format,
+                          req, req.headers['X-Copy-From-Account'])
+        req = Request.blank(
+            '/v/a/c/o',
+            headers={'X-Copy-From-Account': ''})
         self.assertRaises(HTTPException,
                           constraints.check_account_format,
                           req, req.headers['X-Copy-From-Account'])

@@ -33,6 +33,7 @@ from swift.common.utils import get_logger, whataremyips, storage_directory, \
     renamer, mkdirs, lock_parent_directory, config_true_value, \
     unlink_older_than, dump_recon_cache, rsync_ip, ismount, json, Timestamp
 from swift.common import ring
+from swift.common.ring.utils import is_local_device
 from swift.common.http import HTTP_NOT_FOUND, HTTP_INSUFFICIENT_STORAGE
 from swift.common.bufferedhttp import BufferedHTTPConnection
 from swift.common.exceptions import DriveNotMounted
@@ -58,12 +59,12 @@ def quarantine_db(object_file, server_type):
         os.path.join(object_dir, '..', '..', '..', '..', 'quarantined',
                      server_type + 's', os.path.basename(object_dir)))
     try:
-        renamer(object_dir, quarantine_dir)
+        renamer(object_dir, quarantine_dir, fsync=False)
     except OSError as e:
         if e.errno not in (errno.EEXIST, errno.ENOTEMPTY):
             raise
         quarantine_dir = "%s-%s" % (quarantine_dir, uuid.uuid4().hex)
-        renamer(object_dir, quarantine_dir)
+        renamer(object_dir, quarantine_dir, fsync=False)
 
 
 def roundrobin_datadirs(datadirs):
@@ -543,8 +544,9 @@ class Replicator(Daemon):
             return
         self._local_device_ids = set()
         for node in self.ring.devs:
-            if (node and node['replication_ip'] in ips and
-                    node['replication_port'] == self.port):
+            if node and is_local_device(ips, self.port,
+                                        node['replication_ip'],
+                                        node['replication_port']):
                 if self.mount_check and not ismount(
                         os.path.join(self.root, node['device'])):
                     self.logger.warn(
