@@ -43,7 +43,7 @@ from swift.common.utils import (
     clean_content_type, config_true_value, ContextPool, csv_append,
     GreenAsyncPile, GreenthreadSafeIterator, json, Timestamp,
     normalize_delete_at_timestamp, public, get_expirer_container,
-    quorum_size, is_container_sharded)
+    quorum_size, is_container_sharded, to_shard_trie)
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_metadata, check_object_creation, \
     check_copy_from_header, check_destination_header, \
@@ -239,15 +239,13 @@ class BaseObjectController(Controller):
                                                   self.container_name,
                                                   ex.key)
             cont_info = self.container_info(acct, cont)
-            new_trie = cont_info['shardtrie']
+            new_trie = to_shard_trie(cont_info['shardtrie'])
             new_trie.trim_trunk()
             return self._get_shard_node(new_trie, cont_info)
 
     def _find_shard_path(self, container_info):
-        try:
-            trie = shardtrie.ShardTrie.load_from_json(container_info['shardtrie'])
-        except:
-            trie = shardtrie.ShardTrie()
+        trie = to_shard_trie(container_info['shardtrie'])
+
         prefix, container_info = self._get_shard_node(trie, container_info)
         if prefix:
             acct, cont = get_container_shard_path(self.account_name,

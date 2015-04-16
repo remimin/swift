@@ -22,7 +22,8 @@ from xml.etree.cElementTree import Element, SubElement, tostring
 from eventlet import Timeout
 
 import swift.common.db
-from swift.container.backend import ContainerBroker, DATADIR
+from swift.container.backend import ContainerBroker, DATADIR, \
+    RECORD_TYPE_TRIE_NODE
 from swift.container.replicator import ContainerReplicatorRpc
 from swift.common.db import DatabaseAlreadyExists
 from swift.common.container_sync_realms import ContainerSyncRealms
@@ -319,6 +320,23 @@ class ContainerController(BaseStorageServer):
             broker.update_status_changed_at(timestamp)
         return recreated
 
+    def _generate_trie_records(self, req):
+        records = []
+        req_timestamp = valid_timestamp(req)
+
+        # Initialise the record inputs that aren't required for trie records
+        size = policy_index = 0
+        etag = content_type = ''
+        for delete, node_header in enumerate(('x-backend-shard-new-keys',
+                                              'x-backend-shard-del-keys')):
+            if node_header in req.headers:
+                for name in req.headers[node_header].split(','):
+                    records.append(
+                        (name, req_timestamp.internal, size, content_type,
+                         etag, delete, policy_index, RECORD_TYPE_TRIE_NODE))
+
+        return records
+
     @public
     @timing_stats()
     def PUT(self, req):
@@ -348,11 +366,20 @@ class ContainerController(BaseStorageServer):
                     pass
             if not os.path.exists(broker.db_file):
                 return HTTPNotFound()
-            broker.put_object(obj, req_timestamp.internal,
-                              int(req.headers['x-size']),
-                              req.headers['x-content-type'],
-                              req.headers['x-etag'], 0,
-                              obj_policy_index)
+            # add the object being added to a list, so we can pass node records
+            # as well if they accompany the request
+            obj_records = [(obj, req_timestamp.internal,
+                           int(req.headers['x-size']),
+                           req.headers['x-content-type'],
+                           req.headers['x-etag'], 0,
+                           obj_policy_index)]
+
+            # Generate a list of sharding node trie records that have changed
+            # in this container. Will return an empty list if there are none.
+            obj_records += self._generate_trie_records(req)
+
+            for record in obj_records:
+                broker.put_object(*record)
             return HTTPCreated(request=req)
         else:   # put container
             if requested_policy_index is None:
@@ -545,6 +572,14 @@ class ContainerController(BaseStorageServer):
         broker = self._get_container_broker(drive, part, account, container)
         if broker.is_deleted():
             return HTTPNotFound(request=req)
+
+        # Update sharding trie table records according to req
+        trie_records = self._generate_trie_records(req)
+        if trie_records:
+            # We need to put the shard records into the database
+            for record in trie_records:
+                broker.put_object(*record)
+
         metadata = {}
         metadata.update(
             (key, (value, req_timestamp.internal))
@@ -557,46 +592,8 @@ class ContainerController(BaseStorageServer):
                         metadata['X-Container-Sync-To'][0] != \
                         broker.metadata['X-Container-Sync-To'][0]:
                     broker.set_x_container_sync_points(-1, -1)
-            metadata = self._deal_with_shard_metadata(metadata, broker)
             broker.update_metadata(metadata, validate_metadata=True)
         return HTTPNoContent(request=req)
-
-    def _deal_with_shard_metadata(self, metadata, broker):
-        del_keys_header = get_sys_meta_prefix('container') + 'shard-rm-keys'
-        new_keys_header = get_sys_meta_prefix('container') + 'shard-new-keys'
-        added = deleted = False
-
-        # Shortcut if no sharded metadata
-        if del_keys_header not in metadata and new_keys_header not in metadata:
-            return metadata
-
-        trie = broker.build_shard_trie()
-        if del_keys_header in metadata:
-            modified = False
-            for key in metadata[del_keys_header].split(','):
-                deleted = trie.delete(key)
-                if not modified and deleted:
-                    modified = deleted
-            deleted = modified
-            del metadata[del_keys_header]
-
-        if new_keys_header in metadata:
-            modified = False
-            for key in metadata[new_keys_header].split(','):
-                try:
-                    added = trie.add(key, flag=shardtrie.DISTRIBUTED_BRANCH)
-                except shardtrie.ShardTrieDistributedBranchException as ex:
-                    # TODO deal with this case better
-                    added = False
-                if not modified and added:
-                    modified = added
-            added = modified
-            del metadata[new_keys_header]
-
-        if deleted or added:
-            broker.set_extra_shard_nodes(trie.get_distributed_nodes())
-
-        return metadata
 
     def __call__(self, env, start_response):
         start_time = time.time()

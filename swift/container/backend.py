@@ -33,6 +33,9 @@ SQLITE_ARG_LIMIT = 999
 
 DATADIR = 'containers'
 
+RECORD_TYPE_OBJECT = 0
+RECORD_TYPE_TRIE_NODE = 1
+
 POLICY_STAT_TABLE_CREATE = '''
     CREATE TABLE policy_stat (
         storage_policy_index INTEGER PRIMARY KEY,
@@ -247,7 +250,7 @@ class ContainerBroker(DatabaseBroker):
             VALUES (?)
         """, (storage_policy_index,))
 
-    def create_extra_shard_nodes_table(self, conn):
+    def create_shard_nodes_table(self, conn):
         """
         Create the object table which is specific to the container DB.
         Not a part of Pluggable Back-ends, internal to the baseline code.
@@ -255,10 +258,11 @@ class ContainerBroker(DatabaseBroker):
         :param conn: DB connection object
         """
         conn.executescript("""
-            CREATE TABLE extra_shard_nodes (
+            CREATE TABLE shard_nodes (
                 ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
-                object TEXT,
+                name TEXT,
                 created_at TEXT,
+                deleted INTEGER DEFAULT 0,
                 flag INTEGER,
             );
         """)
@@ -296,17 +300,17 @@ class ContainerBroker(DatabaseBroker):
         """See :func:`swift.common.db.DatabaseBroker._commit_puts_load`"""
         data = pickle.loads(entry.decode('base64'))
         (name, timestamp, size, content_type, etag, deleted) = data[:6]
-        if len(data) > 6:
-            storage_policy_index = data[6]
-        else:
-            storage_policy_index = 0
+        storage_policy_index = data[6] if len(data) > 6 else 0
+        record_type = data[7] if len(data) > 7 else RECORD_TYPE_OBJECT
+
         item_list.append({'name': name,
                           'created_at': timestamp,
                           'size': size,
                           'content_type': content_type,
                           'etag': etag,
                           'deleted': deleted,
-                          'storage_policy_index': storage_policy_index})
+                          'storage_policy_index': storage_policy_index,
+                          'record_type': record_type})
 
     def empty(self):
         """
@@ -341,10 +345,10 @@ class ContainerBroker(DatabaseBroker):
     def make_tuple_for_pickle(self, record):
         return (record['name'], record['created_at'], record['size'],
                 record['content_type'], record['etag'], record['deleted'],
-                record['storage_policy_index'])
+                record['storage_policy_index'], record['record_type'])
 
     def put_object(self, name, timestamp, size, content_type, etag, deleted=0,
-                   storage_policy_index=0):
+                   storage_policy_index=0, record_type=RECORD_TYPE_OBJECT):
         """
         Creates an object in the DB with its metadata.
 
@@ -356,11 +360,14 @@ class ContainerBroker(DatabaseBroker):
         :param deleted: if True, marks the object as deleted and sets the
                         deleted_at timestamp to timestamp
         :param storage_policy_index: the storage policy index for the object
+        :param record_type: The type of record this is (either references
+                            object data or a trie node)
         """
         record = {'name': name, 'created_at': timestamp, 'size': size,
                   'content_type': content_type, 'etag': etag,
                   'deleted': deleted,
-                  'storage_policy_index': storage_policy_index}
+                  'storage_policy_index': storage_policy_index,
+                  'record_type': record_type}
         self.put_record(record)
 
     def _is_deleted_info(self, object_count, put_timestamp, delete_timestamp,
@@ -460,7 +467,7 @@ class ContainerBroker(DatabaseBroker):
     def build_shard_trie(self, policy_index=0):
         trie = shardtrie.ShardTrie()
         errors = []
-        for extra_node in self.get_extra_shard_nodes():
+        for extra_node in self.get_shard_nodes():
             trie.add(extra_node[0], timestamp=extra_node[1],
                      flag=extra_node[2])
         for obj in self.list_objects_iter(
@@ -725,36 +732,48 @@ class ContainerBroker(DatabaseBroker):
 
         :param item_list: list of dictionaries of {'name', 'created_at',
                           'size', 'content_type', 'etag', 'deleted',
-                          'storage_policy_index'}
+                          'storage_policy_index', 'record_type'}
         :param source: if defined, update incoming_sync with the source
         """
         for item in item_list:
             if isinstance(item['name'], unicode):
                 item['name'] = item['name'].encode('utf-8')
 
-        def _really_merge_items(conn):
-            curs = conn.cursor()
+        trie_node_list = [item for item in item_list
+                          if item['record_type'] == RECORD_TYPE_TRIE_NODE]
+
+        item_list = [item for item in item_list
+                     if item['record_type'] == RECORD_TYPE_OBJECT]
+
+        def _merge_items_by_type(curs, rec_type='object'):
+            obj = rec_type == 'object'
+            if obj:
+                rec_list = item_list
+            else:
+                rec_list = trie_node_list
+
             if self.get_db_version(conn) >= 1:
                 query_mod = ' deleted IN (0, 1) AND '
             else:
                 query_mod = ''
-            curs.execute('BEGIN IMMEDIATE')
-            # Get created_at times for objects in item_list that already exist.
+
+            # Get created_at times for objects in rec_list that already exist.
             # We must chunk it up to avoid sqlite's limit of 999 args.
             created_at = {}
-            for offset in xrange(0, len(item_list), SQLITE_ARG_LIMIT):
+            for offset in xrange(0, len(rec_list), SQLITE_ARG_LIMIT):
                 chunk = [rec['name'] for rec in
-                         item_list[offset:offset + SQLITE_ARG_LIMIT]]
+                         rec_list[offset:offset + SQLITE_ARG_LIMIT]]
+                sql = 'SELECT name, ' + 'storage_policy_index' if obj else '0'
+                sql += ', created_at '
+                sql += 'FROM ? WHERE ' + query_mod + ' name IN (%s)'
                 created_at.update(
                     ((rec[0], rec[1]), rec[2]) for rec in curs.execute(
-                        'SELECT name, storage_policy_index, created_at '
-                        'FROM object WHERE ' + query_mod + ' name IN (%s)' %
-                        ','.join('?' * len(chunk)), chunk))
+                        sql % ','.join('?' * len(chunk)), rec_type, chunk))
             # Sort item_list into things that need adding and deleting, based
             # on results of created_at query.
             to_delete = {}
             to_add = {}
-            for item in item_list:
+            for item in rec_list:
                 item.setdefault('storage_policy_index', 0)  # legacy
                 item_ident = (item['name'], item['storage_policy_index'])
                 if created_at.get(item_ident) < item['created_at']:
@@ -766,20 +785,41 @@ class ContainerBroker(DatabaseBroker):
                     else:
                         to_add[item_ident] = item
             if to_delete:
-                curs.executemany(
-                    'DELETE FROM object WHERE ' + query_mod +
-                    'name=? AND storage_policy_index=?',
-                    ((rec['name'], rec['storage_policy_index'])
-                     for rec in to_delete.itervalues()))
+                sql = 'DELETE FROM ? WHERE ' + query_mod + 'name=?'
+                sql += 'AND storage_policy_index=?' if obj else ''
+                if obj:
+                    del_generator = ((rec_type, rec['name'],
+                                      rec['storage_policy_index'])
+                                     for rec in to_delete.itervalues())
+                else:
+                    del_generator = ((rec_type, rec['name'])
+                                     for rec in to_delete.itervalues())
+                curs.executemany(sql, del_generator)
             if to_add:
-                curs.executemany(
-                    'INSERT INTO object (name, created_at, size, content_type,'
-                    'etag, deleted, storage_policy_index)'
-                    'VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    ((rec['name'], rec['created_at'], rec['size'],
-                      rec['content_type'], rec['etag'], rec['deleted'],
-                      rec['storage_policy_index'])
-                     for rec in to_add.itervalues()))
+                if obj:
+                    curs.executemany(
+                        'INSERT INTO object (name, created_at, size, '
+                        'content_type, etag, deleted, storage_policy_index)'
+                        'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                        ((rec['name'], rec['created_at'], rec['size'],
+                        rec['content_type'], rec['etag'], rec['deleted'],
+                        rec['storage_policy_index'])
+                        for rec in to_add.itervalues()))
+                else:
+                    # 3 == DISTRIBUTED_BRANCH
+                    curs.executemany(
+                        'INSERT INTO shard_nodes (name, created_at, deleted, '
+                        'flag) VALUES (?, ?, ?, ?)',
+                        ((rec['name'], rec['created_at'], rec['deleted'], 3)
+                        for rec in to_add.itervalues()))
+
+        def _really_merge_items(conn):
+            curs = conn.cursor()
+            curs.execute('BEGIN IMMEDIATE')
+            if item_list:
+                _merge_items_by_type(curs, 'object')
+            if trie_node_list:
+                _merge_items_by_type(curs, 'shard_nodes')
             if source:
                 # for replication we rely on the remote end sending merges in
                 # order with no gaps to increment sync_points
@@ -950,33 +990,17 @@ class ContainerBroker(DatabaseBroker):
             CONTAINER_STAT_VIEW_SCRIPT +
             'COMMIT;')
 
-    def get_extra_shard_nodes(self):
+    def get_shard_nodes(self):
         data = []
         self._commit_puts_stale_ok()
         with self.get() as conn:
             try:
                 data = conn.execute('''
-                    SELECT object, created_at, flag
-                        FROM extra_shard_nodes;
+                    SELECT name, created_at, flag
+                    FROM shard_nodes
+                    WHERE deleted=0;
                     ''')
-            except Exception:
-                pass
+            except sqlite3.OperationalError as err:
+                if 'no such table: shard_nodes' in str(err):
+                    self.create_shard_nodes_table()
         return data
-
-    def set_extra_shard_nodes(self, nodes):
-        if nodes:
-            with self.get() as conn:
-                try:
-                    curs = conn.cursor()
-                    curs.execute('DELETE FROM extra_shard_nodes')
-
-                    curs.executemany(
-                        'INSERT INTO extra_shard_nodes (object, created_at, '
-                        'flag) VALUES (?, ?, ?)',
-                        ((r.key, r.timestamp, r.flag) for r in nodes))
-                except sqlite3.OperationalError as err:
-                    if "no such table: extra_shard_nodes" not in str(err):
-                        self.create_extra_shard_nodes_table(conn)
-                        self.set_extra_shard_nodes(nodes)
-                    else:
-                        raise

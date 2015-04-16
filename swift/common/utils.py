@@ -3450,3 +3450,21 @@ def get_md5_socket():
 def is_container_sharded(container_info):
     sharding = container_info['sysmeta'].get('sharding')
     return True if sharding else False
+
+def to_shard_trie(trie):
+    """
+    Helper method to turn the data returned from container info into a
+    ShardTrie object. This is useful as the data passed back at the moment
+    is json, but in future testing we may need to run a compression algorithm
+    on the json data. This method allows us to undo what was done to decread
+    the response size.
+
+    :param trie: trie data as returned of the info; that is info['shardtrie']
+    :return: a ShardTrie object
+    """
+    try:
+        trie = shardtrie.ShardTrie.load_from_json(trie)
+    except:
+        trie = shardtrie.ShardTrie()
+
+    return trie

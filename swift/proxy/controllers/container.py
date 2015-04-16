@@ -20,7 +20,7 @@ import json
 from itertools import chain
 
 from swift.common.utils import public, csv_append, Timestamp, \
-    is_container_sharded, config_true_value
+    is_container_sharded, config_true_value, to_shard_trie
 from swift.common.constraints import check_metadata
 from swift.common import constraints, wsgi, shardtrie
 from swift.common.http import HTTP_ACCEPTED, is_success
@@ -91,15 +91,7 @@ class ContainerController(Controller):
     def GETorHEAD_sharded(self, req, container_info):
         # TODO: build a new respose, loop through the tree. But first need utils
         # to generate the account name and container name etc.
-        trie = container_info.get('shardtrie')
-        try:
-            # Attempt to generate shardtrie from json
-            trie = shardtrie.ShardTrie.load_from_json(trie)
-        except Exception:
-            trie = None
-        if not trie:
-            return HTTPServerError("Failed to build shardtrie")
-
+        trie = to_shard_trie(container_info.get('shardtrie'))
         listing_content_type = get_listing_content_type(req)
 
         responses = list()
@@ -133,12 +125,7 @@ class ContainerController(Controller):
                     #    return HTTPServerError('failed')
                     responses.append(resp)
                     cont_info = self.container_info(acct, cont)
-                    try:
-                        # Attempt to generate shardtrie from json
-                        new_trie = shardtrie.ShardTrie.\
-                            load_from_json(cont_info['shardtrie'])
-                    except Exception:
-                        new_trie = None
+                    new_trie = to_shard_trie(cont_info['shardtrie'])
                     tmp_resps, tmp_obs = _get_nodes_from_trie(new_trie)
                     resps.extend(tmp_resps)
                     objects.extend(tmp_obs)
@@ -367,8 +354,8 @@ class ContainerController(Controller):
                                                   self.container_name,
                                                   node.key)
             cont_info = self.container_info(acct, cont)
-
-            resp = self._delete_shards(cont_info['shardtrie'], req)
+            next_trie = to_shard_trie(cont_info['shardtrie'])
+            resp = self._delete_shards(next_trie, req)
 
             if resp is not None and not is_success(resp.status_int):
                 return resp
@@ -392,19 +379,17 @@ class ContainerController(Controller):
             acct, cont = get_container_shard_path(self.account_name,
                                                   self.container_name,
                                                   prefix)
-            del_keys_header = get_sys_meta_prefix('container') + 'shard-rm-keys'
+            del_keys_header = "X-Backend-Shard-Del-Keys"
             headers = {del_keys_header: ','.join(deleted_nodes)}
             path = '/v1/%s/%s' % (acct, cont)
 
             post_req = wsgi.make_subrequest(req.environ, 'POST', path,
-                                            headers=headers, swift_source='CS')
+                                            headers=headers, swift_source='SH')
             post_resp = self.POST(post_req)
             if not is_success(post_resp.status_int):
                 resp = post_resp
 
         return resp
-
-
 
     @public
     @cors_validation
@@ -419,7 +404,7 @@ class ContainerController(Controller):
         container_info = self.container_info(self.account_name,
                                              self.container_name)
         if is_container_sharded(container_info):
-            trie = container_info.get('shardtrie')
+            trie = to_shard_trie(container_info.get('shardtrie', ''))
             resp = self._delete_shards(trie, req, root=True)
             if not resp.is_success():
                 return resp
