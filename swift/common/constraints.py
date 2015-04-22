@@ -36,6 +36,7 @@ ACCOUNT_LISTING_LIMIT = 10000
 MAX_ACCOUNT_NAME_LENGTH = 256
 MAX_CONTAINER_NAME_LENGTH = 256
 VALID_API_VERSIONS = ["v1", "v1.0"]
+SHARD_GROUP_COUNT = 100000
 
 # If adding an entry to DEFAULT_CONSTRAINTS, note that
 # these constraints are automatically published by the
