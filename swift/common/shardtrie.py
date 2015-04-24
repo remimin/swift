@@ -18,6 +18,7 @@
 import time
 from swift.common.utils import Timestamp
 import json
+import zlib
 
 EMPTY = 0
 DATA_PRESENT = 1
@@ -363,6 +364,9 @@ class ShardTrie():
     def dump_to_json(self):
         return json.dumps(self.dump())
 
+    def dump_to_zlib(self, level=6):
+        return zlib.compress(self.dump_to_json(), level=level)
+
     def trim_trunk(self):
         if len(self._root.children) >= 0 and len(self._root.children) != 1:
             return
@@ -405,6 +409,10 @@ class ShardTrie():
     @staticmethod
     def load_from_json(json_string):
         return ShardTrie.load(json.loads(json_string))
+
+    @staticmethod
+    def load_from_zlib(zlib_string):
+        return ShardTrie.load_from_json(zlib.decompress(zlib_string))
 
     def get_large_subtries(self, count=30):
         results = []

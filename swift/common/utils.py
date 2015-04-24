@@ -3468,3 +3468,21 @@ def to_shard_trie(trie):
         trie = shardtrie.ShardTrie()
 
     return trie
+
+def shard_trie_to_string(trie):
+    """
+    Helper method to turn the trie into something easier to pass back in info,
+    for debugging perposes, it currently calls the ShardTrie.dump_to_json()
+    method, as it need so be a string we can turn back into a ShardTrie.
+
+    There is also a dump_to_zlib(level) method which zlib compresses the json
+    dump.
+
+    Even though the dump to string/compress already exists, this helper function
+    is used in case we need to do more to it, and gives us one place to modify.
+
+    :param trie: the ShardTrie object to convert to a string.
+    :return: a json string.
+    """
+    # return trie.dump_to_zlib()
+    return trie.dump_to_json()

@@ -25,7 +25,7 @@ import sqlite3
 
 from swift.common import shardtrie
 from swift.common.constraints import CONTAINER_LISTING_LIMIT
-from swift.common.utils import Timestamp
+from swift.common.utils import Timestamp, shard_trie_to_string
 from swift.common.db import DatabaseBroker, utf8encode
 
 
@@ -461,7 +461,7 @@ class ContainerBroker(DatabaseBroker):
                 trie, _errors = self.build_shard_trie(
                     data['storage_policy_index'])
                 self.shard_trie = trie
-                data['shardtrie'] = trie.dump_to_json()
+                data['shardtrie'] = shard_trie_to_string(trie)
             return data
 
     def build_shard_trie(self, policy_index=0):
