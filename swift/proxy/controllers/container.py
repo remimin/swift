@@ -20,12 +20,13 @@ import json
 from itertools import chain
 
 from swift.common.utils import public, csv_append, Timestamp, \
-    is_container_sharded, config_true_value, to_shard_trie
+    is_container_sharded, config_true_value
 from swift.common.constraints import check_metadata
 from swift.common import constraints, wsgi, shardtrie
 from swift.common.http import HTTP_ACCEPTED, is_success
 from swift.common.request_helpers import get_listing_content_type, \
     get_container_shard_path, get_sys_meta_prefix
+from swift.common.shardtrie import to_shard_trie
 from swift.proxy.controllers.base import Controller, delay_denial, \
     cors_validation, clear_info_cache
 from swift.common.storage_policy import POLICIES
@@ -102,12 +103,13 @@ class ContainerController(Controller):
         def _run_single_request(account_name, container_name):
             part = self.app.container_ring.get_part(
                 account_name, container_name)
+            node_iter = self.app.iter_nodes(self.app.container_ring, part)
             if not req.environ.get('swift.skip_sharded'):
                 req.environ['swift.skip_sharded'] = True
 
             path = '/%s/%s' % (account_name, container_name)
             tmp_resp = self.GETorHEAD_base(
-                req, _('Container'), self.app.container_ring, part, path)
+                req, _('Container'), node_iter, part, path)
 
             req.environ['swift.skip_sharded'] = False
             return tmp_resp
@@ -231,8 +233,9 @@ class ContainerController(Controller):
         else:
             part = self.app.container_ring.get_part(
                 self.account_name, self.container_name)
+            node_iter = self.app.iter_nodes(self.app.container_ring, part)
             resp = self.GETorHEAD_base(
-                req, _('Container'), self.app.container_ring, part,
+                req, _('Container'), node_iter, part,
                 req.swift_entity_path)
 
         if 'swift.authorize' in req.environ:

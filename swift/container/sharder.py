@@ -30,12 +30,12 @@ from swift.common.db import DatabaseAlreadyExists
 from swift.common.exceptions import DeviceUnavailable
 from swift.common.request_helpers import get_container_shard_path
 from swift.common.shardtrie import ShardTrieDistributedBranchException, \
-    ShardTrie, DISTRIBUTED_BRANCH
+    ShardTrie, DISTRIBUTED_BRANCH, to_shard_trie
 from swift.common.constraints import SHARD_GROUP_COUNT
 from swift.common.ring.utils import is_local_device
 from swift.common.utils import get_logger, audit_location_generator, \
     config_true_value, dump_recon_cache, ratelimit_sleep, \
-    is_container_sharded, to_shard_trie, whataremyips, ismount, hash_path, \
+    is_container_sharded, whataremyips, ismount, hash_path, \
     storage_directory
 from swift.common.daemon import Daemon
 from swift.common.wsgi import ConfigString
@@ -65,6 +65,8 @@ class ContainerSharder(ContainerReplicator):
         self.root = conf.get('devices', '/srv/node')
         concurrency = int(conf.get('concurrency', 8))
         self.cpool = GreenPool(size=concurrency)
+        self.shard_group_count = int(conf.get('shard_group_count',
+                                              SHARD_GROUP_COUNT))
 
         # internal client
         self.conn_timeout = float(conf.get('conn_timeout', 5))
@@ -362,7 +364,7 @@ class ContainerSharder(ContainerReplicator):
             # UPDATE: self.swift is an internal client, and
             #       self._find_shard_container_prefix will follow the
             #       ditributed path
-            candidate_subtries = trie.get_large_subtries(SHARD_GROUP_COUNT)
+            candidate_subtries = trie.get_large_subtries(self.shard_group_count)
             if candidate_subtries:
                 level, size, node = candidate_subtries[0]
                 self.logger.info(_('sharding subtree of size %d on at prefix '
@@ -449,13 +451,13 @@ class ContainerSharder(ContainerReplicator):
                 self._one_shard_pass(reported)
             except (Exception, Timeout):
                 self.logger.increment('errors')
-                self.logger.exception(_('ERROR auditing'))
+                self.logger.exception(_('ERROR sharding'))
             elapsed = time.time() - begin
             if elapsed < self.interval:
                 time.sleep(self.interval - elapsed)
             self.logger.info(
-                _('Container audit pass completed: %.02fs'), elapsed)
-            dump_recon_cache({'container_auditor_pass_completed': elapsed},
+                _('Container sharder pass completed: %.02fs'), elapsed)
+            dump_recon_cache({'container_sharder_pass_completed': elapsed},
                              self.rcache, self.logger)
 
     def run_once(self, *args, **kwargs):

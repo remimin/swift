@@ -25,8 +25,9 @@ import sqlite3
 
 from swift.common import shardtrie
 from swift.common.constraints import CONTAINER_LISTING_LIMIT
-from swift.common.utils import Timestamp, shard_trie_to_string
+from swift.common.utils import Timestamp
 from swift.common.db import DatabaseBroker, utf8encode
+from swift.common.shardtrie import shard_trie_to_string
 
 
 SQLITE_ARG_LIMIT = 999
@@ -257,15 +258,18 @@ class ContainerBroker(DatabaseBroker):
 
         :param conn: DB connection object
         """
-        conn.executescript("""
-            CREATE TABLE shard_nodes (
-                ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT,
-                created_at TEXT,
-                deleted INTEGER DEFAULT 0,
-                flag INTEGER,
-            );
-        """)
+        try:
+            conn.executescript("""
+                CREATE TABLE shard_nodes (
+                    ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT,
+                    created_at TEXT,
+                    deleted INTEGER DEFAULT 0,
+                    flag INTEGER
+                );
+            """)
+        except Exception as ex:
+            pass
 
     def get_db_version(self, conn):
         if self._db_version == -1:
@@ -1002,5 +1006,6 @@ class ContainerBroker(DatabaseBroker):
                     ''')
             except sqlite3.OperationalError as err:
                 if 'no such table: shard_nodes' in str(err):
-                    self.create_shard_nodes_table()
-        return data
+                    self.create_shard_nodes_table(conn)
+            finally:
+                return data

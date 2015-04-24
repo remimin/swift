@@ -216,6 +216,9 @@ use = egg:swift#xprofile
 # log_level = INFO
 # log_address = /dev/log
 #
+# Specify the size a subtree has to reach before being a candidate for sharding
+# shard_group_count = 100000
+#
 # concurrency = 8
 # interval = 30
 # node_timeout = 10

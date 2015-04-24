@@ -16,9 +16,10 @@
 """Distributed prefix tree implementation classes used for container sharding"""
 
 import time
-from swift.common.utils import Timestamp
 import json
 import zlib
+
+from swift.common.utils import Timestamp
 
 EMPTY = 0
 DATA_PRESENT = 1
@@ -424,3 +425,41 @@ class ShardTrie():
         if results:
             return sorted(results, reverse=True)
         return results
+
+
+def to_shard_trie(trie):
+    """
+    Helper method to turn the data returned from container info into a
+    ShardTrie object. This is useful as the data passed back at the moment
+    is json, but in future testing we may need to run a compression algorithm
+    on the json data. This method allows us to undo what was done to decread
+    the response size.
+
+    :param trie: trie data as returned of the info; that is info['shardtrie']
+    :return: a ShardTrie object
+    """
+    try:
+        trie = ShardTrie.load_from_json(trie)
+    except Exception:
+        trie = ShardTrie()
+
+    return trie
+
+
+def shard_trie_to_string(trie):
+    """
+    Helper method to turn the trie into something easier to pass back in info,
+    for debugging perposes, it currently calls the ShardTrie.dump_to_json()
+    method, as it need so be a string we can turn back into a ShardTrie.
+
+    There is also a dump_to_zlib(level) method which zlib compresses the json
+    dump.
+
+    Even though the dump to string/compress already exists, this helper function
+    is used in case we need to do more to it, and gives us one place to modify.
+
+    :param trie: the ShardTrie object to convert to a string.
+    :return: a json string.
+    """
+    # return trie.dump_to_zlib()
+    return trie.dump_to_json()
