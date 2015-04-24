@@ -477,8 +477,8 @@ class ContainerBroker(DatabaseBroker):
                 data = dict(size=obj[2], content_type=obj[3], etag=obj[4])
                 trie.add(obj[0], timestamp=obj[1], data=data)
             except shardtrie.ShardTrieDistributedBranchException as ex:
-                if ex.node.data['timestamp'] < obj[1]:
-                    errors.append((obj, ex.node))
+                # if ex.node.data['timestamp'] < obj[1]:
+                errors.append((obj, ex.node))
 
         return trie, errors
 

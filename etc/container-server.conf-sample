@@ -208,3 +208,21 @@ use = egg:swift#xprofile
 #
 # unwind the iterator of applications
 # unwind = false
+
+[container-sharder]
+# You can override the default log routing for this app here (don't use set!):
+# log_name = container-replicator
+# log_facility = LOG_LOCAL0
+# log_level = INFO
+# log_address = /dev/log
+#
+# concurrency = 8
+# interval = 30
+# node_timeout = 10
+# conn_timeout = 0.5
+#
+# Internal client configuration
+# internal_client_conf_path =
+# request_tries = 3
+#
+# recon_cache_path = /var/cache/swift
