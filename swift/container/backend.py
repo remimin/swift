@@ -472,8 +472,13 @@ class ContainerBroker(DatabaseBroker):
         trie = shardtrie.ShardTrie()
         errors = []
         for extra_node in self.get_shard_nodes():
-            trie.add(extra_node[0], timestamp=extra_node[1],
-                     flag=extra_node[2])
+            try:
+                trie.add(extra_node[0], timestamp=extra_node[1],
+                         flag=extra_node[2])
+            except shardtrie.ShardTrieDistributedBranchException as ex:
+                # distibuted node beyond a distributed node.. broken tree, so
+                # add the ndoe to errors.
+                errors.append((extra_node, ex.node))
         for obj in self.list_objects_iter(
                 CONTAINER_LISTING_LIMIT, '', '', '', '',
                 storage_policy_index=policy_index):
@@ -769,10 +774,11 @@ class ContainerBroker(DatabaseBroker):
                          rec_list[offset:offset + SQLITE_ARG_LIMIT]]
                 sql = 'SELECT name, ' + 'storage_policy_index' if obj else '0'
                 sql += ', created_at '
-                sql += 'FROM ? WHERE ' + query_mod + ' name IN (%s)'
+                sql += 'FROM %s WHERE ' % rec_type
+                sql += query_mod + ' name IN (%s)' % ','.join('?' * len(chunk))
                 created_at.update(
                     ((rec[0], rec[1]), rec[2]) for rec in curs.execute(
-                        sql % ','.join('?' * len(chunk)), rec_type, chunk))
+                        sql, chunk))
             # Sort item_list into things that need adding and deleting, based
             # on results of created_at query.
             to_delete = {}
@@ -789,14 +795,14 @@ class ContainerBroker(DatabaseBroker):
                     else:
                         to_add[item_ident] = item
             if to_delete:
-                sql = 'DELETE FROM ? WHERE ' + query_mod + 'name=?'
+                sql = 'DELETE FROM %s WHERE ' % rec_type
+                sql += query_mod + 'name=?'
                 sql += 'AND storage_policy_index=?' if obj else ''
                 if obj:
-                    del_generator = ((rec_type, rec['name'],
-                                      rec['storage_policy_index'])
+                    del_generator = ((rec['name'], rec['storage_policy_index'])
                                      for rec in to_delete.itervalues())
                 else:
-                    del_generator = ((rec_type, rec['name'])
+                    del_generator = (rec['name']
                                      for rec in to_delete.itervalues())
                 curs.executemany(sql, del_generator)
             if to_add:

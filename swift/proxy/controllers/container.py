@@ -150,7 +150,7 @@ class ContainerController(Controller):
                         xml += "</last_modified></object>"
                         objects.append(xml % obj)
                     else:
-                        objects.append(obj['name'])
+                        objects.append(obj['name'] + '\n')
             return resps, objects
 
         # First run the command on the current container

@@ -135,7 +135,7 @@ class Node():
         count = 0
         if self.has_data():
             count += 1
-        for child in self.children:
+        for child in sorted(self.children):
             count += self.children[child].count_data_nodes()
 
         return count

@@ -36,7 +36,7 @@ from swift.common.ring.utils import is_local_device
 from swift.common.utils import get_logger, audit_location_generator, \
     config_true_value, dump_recon_cache, ratelimit_sleep, \
     is_container_sharded, whataremyips, ismount, hash_path, \
-    storage_directory
+    storage_directory, Timestamp
 from swift.common.daemon import Daemon
 from swift.common.wsgi import ConfigString
 # TODO clean this up (ie move the default conf out of sync)
@@ -155,7 +155,8 @@ class ContainerSharder(ContainerReplicator):
             self.shard_brokers[container] = part, broker, node['id']
         return broker
 
-    def _generate_object_list(self, objs_or_trie, policy_index, delete=False):
+    def _generate_object_list(self, objs_or_trie, policy_index, delete=False,
+                              timestamp=None):
         """
         Create a list of dictionary items ready to be consumed by
         Broker.merge_items()
@@ -163,6 +164,9 @@ class ContainerSharder(ContainerReplicator):
         :param objs_or_trie: list of objects or ShardTrie object
         :param policy_index: the Policy index of the container
         :param delete: mark the objects as deleted; default False
+        :param timestamp: set the objects timestamp to the provided one.
+               This is used specifically when deleting objects that have been
+               sharded away.
 
         :return: A list of item dictionaries ready to be consumed by
                  merge_items.
@@ -172,7 +176,7 @@ class ContainerSharder(ContainerReplicator):
             for node in objs_or_trie.get_important_nodes():
                 if node.flag == DISTRIBUTED_BRANCH:
                     obj = {'name': node.key,
-                           'created_at': node.data['timestamp'],
+                           'created_at': timestamp or node.timestamp,
                            'size': 0,
                            'content_type': '',
                            'etag': '',
@@ -181,7 +185,7 @@ class ContainerSharder(ContainerReplicator):
                            'record_type': RECORD_TYPE_TRIE_NODE}
                 else:
                     obj = {'name': node.key,
-                           'created_at': node.data['timestamp'],
+                           'created_at': timestamp or node.timestamp,
                            'size': node.data['size'],
                            'content_type': node.data['content_type'],
                            'etag': node.data['etag'],
@@ -192,14 +196,27 @@ class ContainerSharder(ContainerReplicator):
         else:
             for item in objs_or_trie:
                 try:
-                    obj = {'name': item[0],
-                           'created_at': item[1],
-                           'size': item[2],
-                           'content_type': item[3],
-                           'etag': item[4],
-                           'deleted': 1 if delete else 0,
-                           'storage_policy_index': policy_index,
-                           'record_type': RECORD_TYPE_OBJECT}
+                    obj = {
+                        'name': item[0],
+                        'created_at': timestamp or item[1]}
+                    if len(obj) > 3:
+                        # object item
+                        obj.update({
+                            'size': item[2],
+                            'content_type': item[3],
+                            'etag': item[4],
+                            'deleted': 1 if delete else 0,
+                            'storage_policy_index': policy_index,
+                            'record_type': RECORD_TYPE_OBJECT})
+                    else:
+                        # Trie node
+                        obj.update({
+                            'size': 0,
+                            'content_type': '',
+                            'etag': '',
+                            'deleted': 1 if delete else 0,
+                            'storage_policy_index': 0,
+                            'record_type': RECORD_TYPE_TRIE_NODE})
                 except:
                     self.logger.warning(_("Failed to add object %s, not in the"
                                           'right format'),
@@ -233,9 +250,11 @@ class ContainerSharder(ContainerReplicator):
             return None
 
         if not broker.metadata.get('X-Container-Sysmeta-Shard-Account'):
-            broker.update_metadata((
-                ('X-Container-Sysmeta-Shard-Account', account),
-                'X-Container-Sysmeta-Shard-Container', container))
+            timestamp = Timestamp(time.time()).internal
+            broker.update_metadata({
+                'X-Container-Sysmeta-Shard-Account': (account, timestamp),
+                'X-Container-Sysmeta-Shard-Container': (container, timestamp),
+                'X-Container-Sysmeta-Sharding': ('On', timestamp)})
 
         objects = self._generate_object_list(objs_or_trie, policy_index, delete)
         broker.merge_items(objects)
@@ -285,8 +304,10 @@ class ContainerSharder(ContainerReplicator):
         self.cpool.waitall()
 
         # Remove the now relocated misplaced items.
+        timestamp = Timestamp(time.time()).internal
         objs = [obj for obj, node in misplaced]
-        items = self._generate_object_list(objs, policy_index, delete=True)
+        items = self._generate_object_list(objs, policy_index, delete=True,
+                                           timestamp=timestamp)
         broker.merge_items(items)
         self.logger.info('Finished misplaced shard replication')
 
@@ -305,6 +326,7 @@ class ContainerSharder(ContainerReplicator):
         :return: account, container of the root shard container or the brokers
                  if it can't be determined.
         """
+        info = broker.get_info()
         account = broker.metadata.get('X-Container-Sysmeta-Shard-Account',
                                       broker.account)
         container = broker.metadata.get('X-Container-Sysmeta-Shard-Container',
@@ -370,7 +392,7 @@ class ContainerSharder(ContainerReplicator):
                 self.logger.info(_('sharding subtree of size %d on at prefix '
                                    '%s on container %s'), size, node.key,
                                  broker.container)
-                split_trie = trie.split_trie(node)
+                split_trie = trie.split_trie(node.key)
 
                 try:
                     part, new_broker, node_id = self._get_and_fill_shard_broker(
@@ -399,9 +421,11 @@ class ContainerSharder(ContainerReplicator):
                 self.logger.info(_('Cleaning up sharded objects of old '
                                    'container %s/%s'), broker.account,
                                  broker.container)
+                timestamp = Timestamp(time.time()).internal
                 items = self._generate_object_list(split_trie,
                                                    broker.storage_policy_index,
-                                                   delete=True)
+                                                   delete=True,
+                                                   timestamp=timestamp)
                 broker.merge_items(items)
                 self.logger.info(_('Finished sharding %s/%s, new shard '
                                    'container %s/%s. Sharded at prefix %s.'),
