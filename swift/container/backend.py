@@ -170,6 +170,7 @@ class ContainerBroker(DatabaseBroker):
         self.create_policy_stat_table(conn, storage_policy_index)
         self.create_container_info_table(conn, put_timestamp,
                                          storage_policy_index)
+        self.create_shard_nodes_table(conn)
 
     def create_object_table(self, conn):
         """
@@ -798,13 +799,13 @@ class ContainerBroker(DatabaseBroker):
                         to_add[item_ident] = item
             if to_delete:
                 sql = 'DELETE FROM %s WHERE ' % rec_type
-                sql += query_mod + 'name=?'
+                sql += query_mod + 'name=? '
                 sql += 'AND storage_policy_index=?' if obj else ''
                 if obj:
                     del_generator = ((rec['name'], rec['storage_policy_index'])
                                      for rec in to_delete.itervalues())
                 else:
-                    del_generator = (rec['name']
+                    del_generator = ([rec['name']]
                                      for rec in to_delete.itervalues())
                 curs.executemany(sql, del_generator)
             if to_add:

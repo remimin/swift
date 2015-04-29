@@ -116,9 +116,6 @@ class ContainerSharder(ContainerReplicator):
         self.node_timeout = int(conf.get('node_timeout', 10))
         self.reclaim_age = float(conf.get('reclaim_age', 86400 * 7))
 
-        # direct client
-
-
         # internal client
         self.conn_timeout = float(conf.get('conn_timeout', 5))
         request_tries = int(conf.get('request_tries') or 3)
@@ -192,8 +189,7 @@ class ContainerSharder(ContainerReplicator):
 
         :returns: a local shard container broker
         """
-        if self.shard_brokers and \
-                container in self.shard_brokers:
+        if container in self.shard_brokers:
             return self.shard_brokers[container][1]
         part = self.ring.get_part(account, container)
         node = self.find_local_handoff_for_part(part)
@@ -210,8 +206,8 @@ class ContainerSharder(ContainerReplicator):
                 broker.initialize(storage_policy_index=policy_index)
             except DatabaseAlreadyExists:
                 pass
-        if self.shard_brokers is not None:
-            self.shard_brokers[container] = part, broker, node['id']
+
+        self.shard_brokers[container] = part, broker, node['id']
         return broker
 
     def _generate_object_list(self, objs_or_trie, policy_index, delete=False,
@@ -479,16 +475,6 @@ class ContainerSharder(ContainerReplicator):
                     self._replicate_object, part, new_broker.db_file, node_id)
                 self.cpool.waitall()
 
-                # wipe out the cache do disable bypass in delete_db
-                cleanups = self.shard_cleanups
-                self.shard_cleanups = self.shard_brokers = None
-                self.logger.info('Cleaning up %d replicated shard containers',
-                                 len(cleanups))
-
-                for container in cleanups.values():
-                    self.cpool.spawn_n(self.delete_db, container)
-                self.cpool.waitall()
-
                 self.logger.info(_('Cleaning up sharded objects of old '
                                    'container %s/%s'), broker.account,
                                  broker.container)
@@ -507,6 +493,16 @@ class ContainerSharder(ContainerReplicator):
                                  broker.account, broker.container,
                                  new_broker.account, new_broker.container,
                                  split_trie.root_key)
+
+        # wipe out the cache do disable bypass in delete_db
+        cleanups = self.shard_cleanups
+        self.shard_cleanups = None
+        self.logger.info('Cleaning up %d replicated shard containers',
+                         len(cleanups))
+
+        for container in cleanups.values():
+            self.cpool.spawn_n(self.delete_db, container)
+        self.cpool.waitall()
 
         self.logger.info(_('Finished container sharding pass'))
 
