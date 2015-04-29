@@ -772,7 +772,8 @@ class ContainerBroker(DatabaseBroker):
             for offset in xrange(0, len(rec_list), SQLITE_ARG_LIMIT):
                 chunk = [rec['name'] for rec in
                          rec_list[offset:offset + SQLITE_ARG_LIMIT]]
-                sql = 'SELECT name, ' + 'storage_policy_index' if obj else '0'
+                sql = 'SELECT name, '
+                sql += 'storage_policy_index' if obj else '0'
                 sql += ', created_at '
                 sql += 'FROM %s WHERE ' % rec_type
                 sql += query_mod + ' name IN (%s)' % ','.join('?' * len(chunk))

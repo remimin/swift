@@ -25,7 +25,7 @@ import swift.common.db
 from swift.container.replicator import ContainerReplicator
 from swift.container.backend import ContainerBroker, DATADIR, \
     RECORD_TYPE_TRIE_NODE, RECORD_TYPE_OBJECT
-from swift.common import ring, internal_client
+from swift.common import ring, internal_client, direct_client
 from swift.common.db import DatabaseAlreadyExists
 from swift.common.exceptions import DeviceUnavailable
 from swift.common.request_helpers import get_container_shard_path
@@ -41,6 +41,8 @@ from swift.common.daemon import Daemon
 from swift.common.wsgi import ConfigString
 # TODO clean this up (ie move the default conf out of sync)
 from swift.container.sync import ic_conf_body
+from swift.common.storage_policy import POLICIES
+
 
 
 class ContainerSharder(ContainerReplicator):
@@ -67,6 +69,11 @@ class ContainerSharder(ContainerReplicator):
         self.cpool = GreenPool(size=concurrency)
         self.shard_group_count = int(conf.get('shard_group_count',
                                               SHARD_GROUP_COUNT))
+        self.node_timeout = int(conf.get('node_timeout', 10))
+        self.reclaim_age = float(conf.get('reclaim_age', 86400 * 7))
+
+        # direct client
+
 
         # internal client
         self.conn_timeout = float(conf.get('conn_timeout', 5))
@@ -89,6 +96,13 @@ class ContainerSharder(ContainerReplicator):
             raise SystemExit(
                 _('Unable to load internal client from config: %r (%s)') %
                 (internal_client_conf_path, err))
+
+    def _zero_stats(self):
+        """Zero out the stats."""
+        self.stats = {'attempted': 0, 'success': 0, 'failure': 0, 'ts_repl': 0,
+                      'no_change': 0, 'hashmatch': 0, 'rsync': 0, 'diff': 0,
+                      'remove': 0, 'empty': 0, 'remote_merge': 0,
+                      'start': time.time(), 'diff_capped': 0}
 
     def _get_local_devices(self):
         self._local_device_ids = set()
@@ -348,6 +362,7 @@ class ContainerSharder(ContainerReplicator):
         return super(ContainerReplicator, self).delete_db(broker)
 
     def _one_shard_pass(self, reported):
+        self._zero_stats()
         local_devs = self._get_local_devices()
 
         all_locs = audit_location_generator(self.devices, DATADIR, '.db',
@@ -402,6 +417,17 @@ class ContainerSharder(ContainerReplicator):
                     self.logger.warning(_(str(duex)))
                     continue
 
+                # Make sure the account exists by running a container PUT
+                try:
+                    policy = POLICIES.get_by_index(broker.storage_policy_index)
+                    headers={'X-Storage-Policy': policy.name}
+                    self.swift.create_container(new_broker.account,
+                                                new_broker.container,
+                                                headers=headers)
+                except internal_client.UnexpectedResponse as ex:
+                    self.logger.warning(_('Failed to put container: %s'),
+                                        str(ex))
+
                 self.logger.info(_('Replicating new shard container %s/%s'),
                                  new_broker.account, new_broker.container)
                 self.cpool.spawn_n(
@@ -426,6 +452,10 @@ class ContainerSharder(ContainerReplicator):
                                                    broker.storage_policy_index,
                                                    delete=True,
                                                    timestamp=timestamp)
+                # Make sure the new distributed node has been added.
+                dist_node = trie[node.key]
+                items += self._generate_object_list(
+                    ShardTrie(root_node=dist_node), 0)
                 broker.merge_items(items)
                 self.logger.info(_('Finished sharding %s/%s, new shard '
                                    'container %s/%s. Sharded at prefix %s.'),

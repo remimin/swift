@@ -166,12 +166,12 @@ class Node():
     def get_node(self, key):
         key_len = len(self.key)
 
-        if self.flag == DISTRIBUTED_BRANCH:
+        if self.key == key:
+            return self
+        elif self.flag == DISTRIBUTED_BRANCH:
             raise ShardTrieDistributedBranchException(
                 "Subtree '%s' has been distributed." % (self.key), self.key,
                 self)
-        elif self.key == key:
-            return self
         elif key_len < len(key):
             next_key = key[:key_len + 1]
             if next_key not in self.children:
