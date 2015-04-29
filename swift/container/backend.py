@@ -745,6 +745,7 @@ class ContainerBroker(DatabaseBroker):
         :param source: if defined, update incoming_sync with the source
         """
         for item in item_list:
+            item.setdefault('record_type', RECORD_TYPE_OBJECT)
             if isinstance(item['name'], unicode):
                 item['name'] = item['name'].encode('utf-8')
 
