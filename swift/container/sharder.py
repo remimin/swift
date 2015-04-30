@@ -109,6 +109,7 @@ class ContainerSharder(ContainerReplicator):
         self.default_port = 6001
         self.port = int(conf.get('bind_port', self.default_port))
         self.root = conf.get('devices', '/srv/node')
+        self.vm_test_mode = config_true_value(conf.get('vm_test_mode', 'no'))
         concurrency = int(conf.get('concurrency', 8))
         self.cpool = GreenPool(size=concurrency)
         self.shard_group_count = int(conf.get('shard_group_count',
