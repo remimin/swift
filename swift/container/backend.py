@@ -1018,3 +1018,39 @@ class ContainerBroker(DatabaseBroker):
                     self.create_shard_nodes_table(conn)
             finally:
                 return data
+
+    def get_all_shard_nodes_since(self, timestamp=None, limit=None):
+        data = []
+        self._commit_puts_stale_ok()
+        with self.get() as conn:
+            try:
+                sql = 'SELECT name, created_at, flag, deleted '
+                sql += 'FROM shard_nodes '
+                sql += 'WHERE created_at >= %s ' % timestamp \
+                    if timestamp else ''
+                sql += 'ORDER BY ROWID ASC'
+                sql += 'LIMIT %d' % limit if limit else ''
+                data = conn.execute(sql)
+            except sqlite3.OperationalError as err:
+                if 'no such table: shard_nodes' in str(err):
+                    self.create_shard_nodes_table(conn)
+            finally:
+                return data
+
+    def shard_nodes_to_items(self, nodes):
+        result = list()
+        for item in nodes:
+            try:
+                obj = {
+                    'name': item[0],
+                    'created_at': item[1],
+                    'size': 0,
+                    'content_type': '',
+                    'etag': '',
+                    'deleted': item[3] if len(item) > 3 else 0,
+                    'storage_policy_index': 0,
+                    'record_type': RECORD_TYPE_TRIE_NODE}
+                result.append(obj)
+            except:
+                continue
+        return result

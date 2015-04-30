@@ -208,6 +208,8 @@ class ContainerSharder(ContainerReplicator):
             except DatabaseAlreadyExists:
                 pass
 
+        # Get the valid info into the broker.container, etc
+        broker.get_info()
         self.shard_brokers[container] = part, broker, node['id']
         return broker
 

@@ -315,7 +315,28 @@ class Replicator(Daemon):
                                      'sync_point': point}],
                                    incoming=False)
                 return True
+
+        # Note the following will have to be cleaned up at some point. The
+        # hook here is to grab other items (non-objects) to replicate, namely
+        # the shard nodes stored in a container database. The number of these
+        # should always been _much_ less then normal objects, however for
+        # completeness we should probably have a limit and pointer here too.
+        other_items = self._other_items_hook()
+        if other_items:
+            with Timeout(self.node_timeout):
+                response = http.replicate('merge_items', other_items, local_id)
+            if not response or response.status >= 300 or response.status < 200:
+                if response:
+                    self.logger.error(_('ERROR Bad response %(status)s from '
+                                        '%(host)s'),
+                                      {'status': response.status,
+                                       'host': http.host})
+                return False
+
         return False
+
+    def _other_items_hook(self, broker):
+        return []
 
     def _in_sync(self, rinfo, info, broker, local_sync):
         """
@@ -733,9 +754,17 @@ class ReplicatorRpc(object):
             point = objects[-1]['ROWID']
             objects = existing_broker.get_items_since(point, 1000)
             sleep()
+        # Note the following hook will need to change to using a pointer and
+        # limit in the future.
+        other_items = self._other_items_hook()
+        if other_items:
+            new_broker.merge_items(other_items)
         new_broker.newid(args[0])
         renamer(old_filename, db_file)
         return HTTPNoContent()
+
+    def _other_items_hook(self, broker):
+        return []
 
 # Footnote [1]:
 #   This orders the nodes so that, given nodes a b c, a will contact b then c,
