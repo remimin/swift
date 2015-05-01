@@ -434,6 +434,9 @@ class ContainerSharder(ContainerReplicator):
             root_account, root_container = \
                 ContainerSharder.get_shard_root_path(broker)
             trie, misplaced = broker.build_shard_trie()
+            if root_container != broker.container:
+                # This node isn't the root node, so trim the trunk
+                trie.trim_trunk()
             if misplaced:
                 # There are objects that shouldn't be in this trie, that is to
                 # say, they live beyond a distributed node, so we need to move
@@ -456,6 +459,11 @@ class ContainerSharder(ContainerReplicator):
             candidate_subtries = trie.get_large_subtries(self.shard_group_count)
             if candidate_subtries:
                 level, size, node = candidate_subtries[0]
+                if node.flag == DISTRIBUTED_BRANCH:
+                    self.logger.warning(_('Best candidate for a shard trie '
+                                          'starts with a distributed node, '
+                                          'something is screwy'))
+                    continue
                 self.logger.info(_('sharding subtree of size %d on at prefix '
                                    '%s on container %s'), size, node.key,
                                  broker.container)
