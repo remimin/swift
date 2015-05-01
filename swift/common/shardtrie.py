@@ -126,10 +126,10 @@ class Node():
         return self
 
     def __iter__(self):
+        yield self
         for child in sorted(self.children):
             for c in self.children[child]:
                 yield c
-        yield self
 
     def count_data_nodes(self):
         count = 0
