@@ -123,12 +123,15 @@ class ContainerController(Controller):
                     acct, cont = get_container_shard_path(self.account_name,
                                                           self.container_name,
                                                           node.key)
+                    cont_info = self.container_info(acct, cont)
+                    new_trie = to_shard_trie(cont_info['shardtrie'])
+                    if new_trie.root_key == shard_trie.root_key:
+                        raise HTTPServerError('Loop detected in distributed '
+                                              'shard tree')
                     resp = _run_single_request(acct, cont)
                     #if not is_success(resp.status_int):
                     #    return HTTPServerError('failed')
                     responses.append(resp)
-                    cont_info = self.container_info(acct, cont)
-                    new_trie = to_shard_trie(cont_info['shardtrie'])
                     tmp_resps, tmp_obs = _get_nodes_from_trie(new_trie)
                     resps.extend(tmp_resps)
                     objects.extend(tmp_obs)
@@ -161,7 +164,10 @@ class ContainerController(Controller):
         responses.append(resp)
 
         # Now run it on all shards so parse trie
-        new_responses, objects = _get_nodes_from_trie(trie)
+        try:
+            new_responses, objects = _get_nodes_from_trie(trie)
+        except HTTPServerError as server_error:
+            return server_error
         responses.extend(new_responses)
 
         # now we can build the response
