@@ -384,11 +384,19 @@ class ContainerSharder(ContainerReplicator):
         :return: account, container of the root shard container or the brokers
                  if it can't be determined.
         """
-        info = broker.get_info()
-        account = broker.metadata.get('X-Container-Sysmeta-Shard-Account',
-                                      broker.account)
-        container = broker.metadata.get('X-Container-Sysmeta-Shard-Container',
-                                      broker.container)
+        broker.get_info()
+        account = broker.metadata.get('X-Container-Sysmeta-Shard-Account')
+        if account:
+            account = account[0]
+        else:
+            account = broker.account
+
+        container = broker.metadata.get('X-Container-Sysmeta-Shard-Container')
+        if container:
+            container = container[0]
+        else:
+            container = broker.container
+
         return account, container
 
     def _post_replicate_hook(self, broker, info, responses):
