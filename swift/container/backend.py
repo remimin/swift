@@ -466,6 +466,10 @@ class ContainerBroker(DatabaseBroker):
                 trie, _errors = self.build_shard_trie(
                     data['storage_policy_index'])
                 self.shard_trie = trie
+                # If the trie isn't the root, then trim the trunk, so we
+                # send back less junk.
+                if self.metadata.get('X-Container-Sysmeta-Shard-Container'):
+                    trie.trim_trunk()
                 data['shardtrie'] = shard_trie_to_string(trie)
             return data
 
