@@ -429,11 +429,11 @@ class ShardTrie():
 
 def to_shard_trie(trie):
     """
-    Helper method to turn the data returned from container info into a
-    ShardTrie object. This is useful as the data passed back at the moment
-    is json, but in future testing we may need to run a compression algorithm
-    on the json data. This method allows us to undo what was done to decread
-    the response size.
+    Helper method to turn the data returned from a GET to the container server
+    with a format=trie info into a ShardTrie object. This is useful as the data
+    passed back at the moment is json, but in future testing we may need to run
+    a compression algorithm on the json data. This method allows us to undo what
+    was done to reduce the response size.
 
     :param trie: trie data as returned of the info; that is info['shardtrie']
     :return: a ShardTrie object

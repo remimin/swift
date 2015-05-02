@@ -103,7 +103,7 @@ MAX_BUFFERED_SLO_SEGMENTS = 10000
 
 #: Query string format= values to their corresponding content-type values
 FORMAT2CONTENT_TYPE = {'plain': 'text/plain', 'json': 'application/json',
-                       'xml': 'application/xml'}
+                       'xml': 'application/xml', 'trie': 'applicaiton/trie'}
 
 
 def check_metadata(req, target_type):

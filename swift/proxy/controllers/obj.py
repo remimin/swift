@@ -217,7 +217,7 @@ class BaseObjectController(Controller):
         return self.app.iter_nodes(
             ring, partition, node_iter=local_first_node_iter)
 
-    def _get_shard_node(self, trie, container_info):
+    def _get_shard_node(self, req, trie):
         """
         Recurrsive funtion that finds the node (or none) but more importantly
         the prefix of the subtree an object sits.
@@ -234,20 +234,20 @@ class BaseObjectController(Controller):
         """
         try:
             _node = trie.get_node(self.object_name)
-            return trie.root_key, container_info
+            return trie.root_key
         except shardtrie.ShardTrieDistributedBranchException as ex:
             acct, cont = get_container_shard_path(self.account_name,
                                                   self.container_name,
                                                   ex.key)
-            cont_info = self.container_info(acct, cont)
-            new_trie = to_shard_trie(cont_info['shardtrie'])
+            new_trie, _resp = self.get_shard_trie(req, acct, cont)
             new_trie.trim_trunk()
-            return self._get_shard_node(new_trie, cont_info)
+            return self._get_shard_node(req, new_trie)
 
-    def _find_shard_path(self, container_info):
-        trie = to_shard_trie(container_info['shardtrie'])
+    def _find_shard_path(self, req):
 
-        prefix, container_info = self._get_shard_node(trie, container_info)
+        trie, _resp = self.get_shard_trie(req, self.container_name,
+                                          self.container_name)
+        prefix = self._get_shard_node(req, trie)
         if prefix:
             acct, cont = get_container_shard_path(self.account_name,
                                                   self.container_name,
@@ -256,7 +256,7 @@ class BaseObjectController(Controller):
             acct, cont = self.account_name, self.container_name
 
         path = "/v1/%s/%s/%s" % (acct, cont, self.object_name)
-        return acct, cont, path, container_info
+        return acct, cont, path
 
     def GETorHEAD(self, req):
         """Handle HTTP GET or HEAD requests."""
@@ -276,7 +276,7 @@ class BaseObjectController(Controller):
 
         if is_container_sharded(container_info):
             self.account_name, self.container_name, req.path_info, \
-                container_info = self._find_shard_path(container_info)
+                = self._find_shard_path(req)
         partition = obj_ring.get_part(
             self.account_name, self.container_name, self.object_name)
         node_iter = self.app.iter_nodes(obj_ring, partition)

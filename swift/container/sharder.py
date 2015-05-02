@@ -172,9 +172,17 @@ class ContainerSharder(ContainerReplicator):
             if dist_key in trie_cache:
                 new_trie = trie_cache[dist_key]
             else:
-                args = get_container_shard_path(account, container, dist_key)
-                info = self.swift.get_container_metadata(*args)
-                new_trie = to_shard_trie(info.get('shardtrie'))
+                acct, cont = get_container_shard_path(account, container,
+                                                      dist_key)
+                path = self.swift.make_path(acct, cont) + '?format=trie'
+                try:
+                    resp = self.swift.make_request('GET', path,
+                                                   acceptable_statuses=(2,))
+                except Exception as ex:
+                    # ATM using exception for debugging purposes, lock this
+                    # down later
+                    pass
+                new_trie = to_shard_trie(resp.body)
                 trie_cache[dist_key] = new_trie
             return self._find_shard_container_prefix(new_trie, key, account,
                                                      container, trie_cache)

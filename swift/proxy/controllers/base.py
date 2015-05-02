@@ -48,6 +48,7 @@ from swift.common.http import is_informational, is_success, is_redirection, \
     is_server_error, HTTP_OK, HTTP_PARTIAL_CONTENT, HTTP_MULTIPLE_CHOICES, \
     HTTP_BAD_REQUEST, HTTP_NOT_FOUND, HTTP_SERVICE_UNAVAILABLE, \
     HTTP_INSUFFICIENT_STORAGE, HTTP_UNAUTHORIZED, HTTP_CONTINUE
+from swift.common.shardtrie import to_shard_trie
 from swift.common.swob import Request, Response, HeaderKeyDict, Range, \
     HTTPException, HTTPRequestedRangeNotSatisfiable, HTTPServiceUnavailable
 from swift.common.request_helpers import strip_sys_meta_prefix, \
@@ -1336,6 +1337,20 @@ class Controller(object):
             clear_info_cache(self.app, req.environ, account)
         else:
             self.app.logger.warning('Could not autocreate account %r' % path)
+
+    def get_shard_trie(self, req, account_name, container_name):
+        part = self.app.container_ring.get_part(
+            account_name, container_name)
+        node_iter = self.app.iter_nodes(self.app.container_ring, part)
+        if not req.environ.get('swift.skip_sharded'):
+            req.environ['swift.skip_sharded'] = True
+
+        path = '/%s/%s?format=trie' % (account_name, container_name)
+        tmp_resp = self.GETorHEAD_base(
+            req, _('Container'), node_iter, part, path)
+        req.environ['swift.skip_sharded'] = False
+
+        return to_shard_trie(tmp_resp.body), tmp_resp
 
     def GETorHEAD_base(self, req, server_type, node_iter, partition, path,
                        client_chunk_size=None):

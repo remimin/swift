@@ -75,7 +75,8 @@ def get_listing_content_type(req):
         req.accept = FORMAT2CONTENT_TYPE.get(
             query_format.lower(), FORMAT2CONTENT_TYPE['plain'])
     out_content_type = req.accept.best_match(
-        ['text/plain', 'application/json', 'application/xml', 'text/xml'])
+        ['text/plain', 'application/json', 'application/xml', 'text/xml',
+         'application/trie'])
     if not out_content_type:
         raise HTTPNotAcceptable(request=req)
     return out_content_type

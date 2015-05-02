@@ -93,27 +93,12 @@ class ContainerController(Controller):
     def GETorHEAD_sharded(self, req, container_info):
         # TODO: build a new respose, loop through the tree. But first need utils
         # to generate the account name and container name etc.
-        trie = to_shard_trie(container_info.get('shardtrie'))
         listing_content_type = get_listing_content_type(req)
 
         responses = list()
         iterator_func = 'get_important_nodes'
         if req.method == "HEAD":
             iterator_func = 'get_distributed_nodes'
-
-        def _run_single_request(account_name, container_name):
-            part = self.app.container_ring.get_part(
-                account_name, container_name)
-            node_iter = self.app.iter_nodes(self.app.container_ring, part)
-            if not req.environ.get('swift.skip_sharded'):
-                req.environ['swift.skip_sharded'] = True
-
-            path = '/%s/%s' % (account_name, container_name)
-            tmp_resp = self.GETorHEAD_base(
-                req, _('Container'), node_iter, part, path)
-
-            req.environ['swift.skip_sharded'] = False
-            return tmp_resp
 
         def _get_nodes_from_trie(shard_trie):
             resps = list()
@@ -123,14 +108,14 @@ class ContainerController(Controller):
                     acct, cont = get_container_shard_path(self.account_name,
                                                           self.container_name,
                                                           node.key)
-                    cont_info = self.container_info(acct, cont)
-                    new_trie = to_shard_trie(cont_info['shardtrie'])
+                    new_trie, resp = self.get_shard_trie(req,
+                                                          self.account_name,
+                                                          self.container_name)
+                    #if not is_success(resp.status_int):
+                    #    return HTTPServerError('failed')
                     if new_trie.root_key == shard_trie.root_key:
                         raise HTTPServerError('Loop detected in distributed '
                                               'shard tree')
-                    resp = _run_single_request(acct, cont)
-                    #if not is_success(resp.status_int):
-                    #    return HTTPServerError('failed')
                     responses.append(resp)
                     tmp_resps, tmp_obs = _get_nodes_from_trie(new_trie)
                     resps.extend(tmp_resps)
@@ -158,10 +143,12 @@ class ContainerController(Controller):
             return resps, objects
 
         # First run the command on the current container
-        resp = _run_single_request(self.account_name, self.container_name)
+        trie, resp = self.get_shard_trie(req, self.account_name,
+                                          self.container_name)
         if not is_success(resp.status_int):
             return resp
         responses.append(resp)
+        trie = to_shard_trie(resp.body)
 
         # Now run it on all shards so parse trie
         try:
@@ -229,9 +216,7 @@ class ContainerController(Controller):
         if not req.environ.get('swift.req_info'):
             container_info = self.container_info(self.account_name,
                                                  self.container_name, req)
-        if container_info and is_container_sharded(container_info) and \
-                not req.environ.get('swift.req_info') and \
-                not req.environ.get('swift.skip_sharded'):
+        if container_info and is_container_sharded(container_info):
             # GETorHEAD_sharded still calls GETorHEAD_base, but seeing as
             # it is sharded there will probably be more then 1 container,
             # therefore needs to send more requests and find more then 1
@@ -363,8 +348,7 @@ class ContainerController(Controller):
             acct, cont = get_container_shard_path(self.account_name,
                                                   self.container_name,
                                                   node.key)
-            cont_info = self.container_info(acct, cont)
-            next_trie = to_shard_trie(cont_info['shardtrie'])
+            next_trie, _resp = self.get_shard_trie(req, acct, cont)
             resp = self._delete_shards(next_trie, req)
 
             if resp is not None and not is_success(resp.status_int):
@@ -414,7 +398,8 @@ class ContainerController(Controller):
         container_info = self.container_info(self.account_name,
                                              self.container_name)
         if is_container_sharded(container_info):
-            trie = to_shard_trie(container_info.get('shardtrie', ''))
+            trie, _resp = self.get_shard_trie(req, self.account_name,
+                                               self.container_name)
             resp = self._delete_shards(trie, req, root=True)
             if not resp.is_success():
                 return resp

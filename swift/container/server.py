@@ -38,6 +38,7 @@ from swift.common import constraints, shardtrie
 from swift.common.bufferedhttp import http_connect
 from swift.common.exceptions import ConnectionTimeout
 from swift.common.http import HTTP_NOT_FOUND, is_success
+from swift.common.shardtrie import shard_trie_to_string
 from swift.common.storage_policy import POLICIES
 from swift.common.base_storage_server import BaseStorageServer
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPConflict, \
@@ -490,6 +491,12 @@ class ContainerController(BaseStorageServer):
                                             pending_timeout=0.1,
                                             stale_reads_ok=True)
         info, is_deleted = broker.get_info_is_deleted()
+        trie = None
+        if out_content_type == 'application/trie':
+            # dump to trie to the body so grab the trie
+            trie = broker.build_shard_trie()
+            if broker.metadata.get('X-Container-Sysmeta-Shard-Container'):
+                trie.trim_trunk()
         resp_headers = gen_resp_headers(info, is_deleted=is_deleted)
         if is_deleted:
             return HTTPNotFound(request=req, headers=resp_headers)
@@ -497,10 +504,11 @@ class ContainerController(BaseStorageServer):
             limit, marker, end_marker, prefix, delimiter, path,
             storage_policy_index=info['storage_policy_index'])
         return self.create_listing(req, out_content_type, info, resp_headers,
-                                   broker.metadata, container_list, container)
+                                   broker.metadata, container_list, container,
+                                   trie=trie)
 
     def create_listing(self, req, out_content_type, info, resp_headers,
-                       metadata, container_list, container):
+                       metadata, container_list, container, trie=None):
         for key, (value, timestamp) in metadata.iteritems():
             if value and (key.lower() in self.save_headers or
                           is_sys_or_user_meta('container', key)):
@@ -510,6 +518,8 @@ class ContainerController(BaseStorageServer):
         if out_content_type == 'application/json':
             ret.body = json.dumps([self.update_data_record(record)
                                    for record in container_list])
+        elif trie:
+            ret.body = shard_trie_to_string(trie)
         elif out_content_type.endswith('/xml'):
             doc = Element('container', name=container.decode('utf-8'))
             for obj in container_list:

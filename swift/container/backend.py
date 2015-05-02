@@ -460,17 +460,19 @@ class ContainerBroker(DatabaseBroker):
             self.account = data['account']
             self.container = data['container']
 
-            sharded = self.metadata.get('X-Container-Sysmeta-Sharding')
-            if sharded:
-                # build the shard tree.
-                trie, _errors = self.build_shard_trie(
-                    data['storage_policy_index'])
-                self.shard_trie = trie
+            # Commenting out adding the shard trie to info, to move it to the
+            # body. (gets to large for a valid header size).
+            #sharded = self.metadata.get('X-Container-Sysmeta-Sharding')
+            #if sharded:
+            #    # build the shard tree.
+            #    trie, _errors = self.build_shard_trie(
+            #        data['storage_policy_index'])
+            #    self.shard_trie = trie
                 # If the trie isn't the root, then trim the trunk, so we
                 # send back less junk.
-                if self.metadata.get('X-Container-Sysmeta-Shard-Container'):
-                    trie.trim_trunk()
-                data['shardtrie'] = shard_trie_to_string(trie)
+            #    if self.metadata.get('X-Container-Sysmeta-Shard-Container'):
+            #        trie.trim_trunk()
+            #    data['shardtrie'] = shard_trie_to_string(trie)
             return data
 
     def build_shard_trie(self, policy_index=0):
