@@ -494,7 +494,10 @@ class ContainerController(BaseStorageServer):
         trie = None
         if out_content_type == 'application/trie':
             # dump to trie to the body so grab the trie
-            trie = broker.build_shard_trie()
+            try:
+                trie, _errors = broker.build_shard_trie()
+            except Exception as ex:
+                pass
             if broker.metadata.get('X-Container-Sysmeta-Shard-Container'):
                 trie.trim_trunk()
         resp_headers = gen_resp_headers(info, is_deleted=is_deleted)
@@ -518,7 +521,7 @@ class ContainerController(BaseStorageServer):
         if out_content_type == 'application/json':
             ret.body = json.dumps([self.update_data_record(record)
                                    for record in container_list])
-        elif trie:
+        elif out_content_type == 'application/trie' and trie:
             ret.body = shard_trie_to_string(trie)
         elif out_content_type.endswith('/xml'):
             doc = Element('container', name=container.decode('utf-8'))

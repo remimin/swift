@@ -144,7 +144,7 @@ class ContainerController(Controller):
 
         # First run the command on the current container
         trie, resp = self.get_shard_trie(req, self.account_name,
-                                          self.container_name)
+                                         self.container_name)
         if not is_success(resp.status_int):
             return resp
         responses.append(resp)

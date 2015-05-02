@@ -1344,13 +1344,13 @@ class Controller(object):
         node_iter = self.app.iter_nodes(self.app.container_ring, part)
         if not req.environ.get('swift.skip_sharded'):
             req.environ['swift.skip_sharded'] = True
-        path = '/%s/%s?format=trie' % (account_name, container_name)
-        if req.method != 'GET':
-            environ = req.environ.copy()
-            environ['REQUEST_METHOD'] = 'GET'
-            new_req = Request.blank(path, environ, req.headers)
-        else:
-            new_req = req
+        path = '/%s/%s' % (account_name, container_name)
+        environ = req.environ.copy()
+        environ['QUERY_STRING'] = "format=trie"
+        environ['REQUEST_METHOD'] = 'GET'
+        environ['HTTP_ACCEPT'] = 'application/trie'
+        environ.pop('PATH_INFO')
+        new_req = Request.blank(path, environ)
         tmp_resp = self.GETorHEAD_base(
             new_req, _('Container'), node_iter, part, path)
         req.environ['swift.skip_sharded'] = False

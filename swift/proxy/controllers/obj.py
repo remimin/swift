@@ -245,7 +245,7 @@ class BaseObjectController(Controller):
 
     def _find_shard_path(self, req):
 
-        trie, _resp = self.get_shard_trie(req, self.container_name,
+        trie, _resp = self.get_shard_trie(req, self.account_name,
                                           self.container_name)
         prefix = self._get_shard_node(req, trie)
         if prefix:
@@ -947,8 +947,8 @@ class BaseObjectController(Controller):
         # NOTE{mattoliverau) - Need to confirm there isn't a problem with
         # passing the container_info of the shard_container not root.
         if is_container_sharded(container_info):
-            shard_acct, shard_cont, shard_path, container_info = \
-                self._find_shard_path(container_info)
+            shard_acct, shard_cont, shard_path = \
+                self._find_shard_path(req)
 
             req.headers['X-Backend-Shard-Account'] = shard_acct
             req.headers['X-Backend-Shard-Container'] = shard_cont
