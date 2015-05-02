@@ -216,7 +216,9 @@ class ContainerController(Controller):
         if not req.environ.get('swift.req_info'):
             container_info = self.container_info(self.account_name,
                                                  self.container_name, req)
-        if container_info and is_container_sharded(container_info):
+        if container_info and is_container_sharded(container_info) and \
+             not req.environ.get('swift.req_info') and \
+             not req.environ.get('swift.skip_sharded'):
             # GETorHEAD_sharded still calls GETorHEAD_base, but seeing as
             # it is sharded there will probably be more then 1 container,
             # therefore needs to send more requests and find more then 1
