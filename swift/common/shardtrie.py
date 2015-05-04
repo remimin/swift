@@ -366,7 +366,7 @@ class ShardTrie():
         return json.dumps(self.dump())
 
     def dump_to_zlib(self, level=6):
-        return zlib.compress(self.dump_to_json(), level=level)
+        return zlib.compress(self.dump_to_json(), level)
 
     def trim_trunk(self):
         if len(self._root.children) >= 0 and len(self._root.children) != 1:
@@ -439,7 +439,8 @@ def to_shard_trie(trie):
     :return: a ShardTrie object
     """
     try:
-        trie = ShardTrie.load_from_json(trie)
+        trie = ShardTrie.load_from_zlib(trie)
+        #trie = ShardTrie.load_from_json(trie)
     except Exception:
         trie = ShardTrie()
 
@@ -461,5 +462,5 @@ def shard_trie_to_string(trie):
     :param trie: the ShardTrie object to convert to a string.
     :return: a json string.
     """
-    # return trie.dump_to_zlib()
-    return trie.dump_to_json()
+    return trie.dump_to_zlib()
+    #return trie.dump_to_json()

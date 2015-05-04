@@ -1346,7 +1346,11 @@ class Controller(object):
             req.environ['swift.skip_sharded'] = True
         path = '/%s/%s' % (account_name, container_name)
         environ = req.environ.copy()
-        environ['QUERY_STRING'] = "format=trie"
+        if req.method not in ('GET', 'HEAD'):
+            # We only need to distributed nodes.
+            environ['QUERY_STRING'] = "format=trie&trie_nodes=distributed"
+        else:
+            environ['QUERY_STRING'] = "format=trie"
         environ['REQUEST_METHOD'] = 'GET'
         environ['HTTP_ACCEPT'] = 'application/trie'
         environ.pop('PATH_INFO')
