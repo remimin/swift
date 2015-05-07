@@ -487,15 +487,22 @@ class ContainerBroker(DatabaseBroker):
                 # add the ndoe to errors.
                 errors.append((extra_node, ex.node))
         if not distributed_only:
-            for obj in self.list_objects_iter(
-                    CONTAINER_LISTING_LIMIT, '', '', '', '',
-                    storage_policy_index=policy_index):
-                try:
-                    data = dict(size=obj[2], content_type=obj[3], etag=obj[4])
-                    trie.add(obj[0], timestamp=obj[1], data=data)
-                except shardtrie.ShardTrieDistributedBranchException as ex:
-                    # if ex.node.data['timestamp'] < obj[1]:
-                    errors.append((obj, ex.node))
+            done = False
+            while not done:
+                i = 0
+                for obj in self.list_objects_iter(
+                        CONTAINER_LISTING_LIMIT, '', '', '', '',
+                        storage_policy_index=policy_index):
+                    try:
+                        data = dict(size=obj[2], content_type=obj[3],
+                                    etag=obj[4])
+                        trie.add(obj[0], timestamp=obj[1], data=data)
+                    except shardtrie.ShardTrieDistributedBranchException as ex:
+                        # if ex.node.data['timestamp'] < obj[1]:
+                        errors.append((obj, ex.node))
+                    finally:
+                        i += 1
+                done = i < CONTAINER_LISTING_LIMIT
 
         return trie, errors
 

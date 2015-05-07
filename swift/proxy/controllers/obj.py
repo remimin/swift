@@ -944,8 +944,6 @@ class BaseObjectController(Controller):
             self.account_name, self.container_name, req)
 
         # in case the object has been sharded to a new container
-        # NOTE{mattoliverau) - Need to confirm there isn't a problem with
-        # passing the container_info of the shard_container not root.
         if is_container_sharded(container_info):
             shard_acct, shard_cont, shard_path = \
                 self._find_shard_path(req)
@@ -1029,8 +1027,8 @@ class BaseObjectController(Controller):
 
         # in case the object has been sharded to a new container
         if is_container_sharded(container_info):
-            self.account_name, self.container_name, req.path_info, \
-                container_info = self._find_shard_path(container_info)
+            self.account_name, self.container_name, req.path_info = \
+                self._find_shard_path(container_info)
 
         # pass the policy index to storage nodes via req header
         req.headers['X-Backend-Storage-Policy-Index'] = policy_index

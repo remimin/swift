@@ -148,7 +148,6 @@ class ContainerController(Controller):
         if not is_success(resp.status_int):
             return resp
         responses.append(resp)
-        trie = to_shard_trie(resp.body)
 
         # Now run it on all shards so parse trie
         try:
