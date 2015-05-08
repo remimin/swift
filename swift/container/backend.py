@@ -475,9 +475,12 @@ class ContainerBroker(DatabaseBroker):
             #    data['shardtrie'] = shard_trie_to_string(trie)
             return data
 
-    def build_shard_trie(self, policy_index=0, distributed_only=False):
+    def build_shard_trie(self, policy_index=0, distributed_only=False,
+                         marker=None):
+        marker = '' if not marker else marker
         trie = shardtrie.ShardTrie()
         errors = []
+        count = 0
         for extra_node in self.get_shard_nodes():
             try:
                 trie.add(extra_node[0], timestamp=extra_node[1],
@@ -487,23 +490,20 @@ class ContainerBroker(DatabaseBroker):
                 # add the ndoe to errors.
                 errors.append((extra_node, ex.node))
         if not distributed_only:
-            done = False
-            while not done:
-                i = 0
-                for obj in self.list_objects_iter(
-                        CONTAINER_LISTING_LIMIT, '', '', '', '',
-                        storage_policy_index=policy_index):
-                    try:
-                        data = dict(size=obj[2], content_type=obj[3],
-                                    etag=obj[4])
-                        trie.add(obj[0], timestamp=obj[1], data=data)
-                    except shardtrie.ShardTrieDistributedBranchException as ex:
-                        # if ex.node.data['timestamp'] < obj[1]:
-                        errors.append((obj, ex.node))
-                    finally:
-                        i += 1
-                done = i < CONTAINER_LISTING_LIMIT
+            for obj in self.list_objects_iter(
+                    CONTAINER_LISTING_LIMIT, marker, '', '', '',
+                    storage_policy_index=policy_index):
+                try:
+                    data = dict(size=obj[2], content_type=obj[3],
+                                etag=obj[4])
+                    trie.add(obj[0], timestamp=obj[1], data=data)
+                except shardtrie.ShardTrieDistributedBranchException as ex:
+                    # if ex.node.data['timestamp'] < obj[1]:
+                    errors.append((obj, ex.node))
+                finally:
+                    count += 1
 
+        trie.add_metadata('data_node_count', count)
         return trie, errors
 
     def set_x_container_sync_points(self, sync_point1, sync_point2):

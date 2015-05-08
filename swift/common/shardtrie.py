@@ -131,6 +131,14 @@ class Node():
             for c in self.children[child]:
                 yield c
 
+    def popping_iter(self):
+        yield self
+        if isinstance(self.parent, Node):
+            del self.parent.children[self.key]
+        for child in sorted(self.children):
+            for c in child.popping_iter():
+                yield c
+
     def count_data_nodes(self):
         count = 0
         if self.has_data():
@@ -178,6 +186,13 @@ class Node():
                 return None
 
             return self.children[next_key].get_node(key)
+
+    def get_last_node(self):
+        if not self._children:
+            return self
+        else:
+            child_keys = sorted(self._children.keys())
+            return self._children[child_keys[-1]].get_last_node()
 
     def get(self, key, full=False):
         node = self.get_node(key)
@@ -232,11 +247,12 @@ class ShardTrie():
     Nodes have a timestamp which is used for merging trees.
     Throws ShardTrieDistributedBranchException, ShardTriedException
     """
-    def __init__(self, root_key='', level=1, root_node=None):
+    def __init__(self, root_key='', level=1, root_node=None, metadata=None):
         if root_node:
             self._root = root_node
         else:
             self._root = Node(root_key, level=level)
+        self._metadata = metadata if metadata else dict()
 
     def __getitem__(self, key):
         return self.get_node(key)
@@ -256,6 +272,13 @@ class ShardTrie():
     @root_key.setter
     def root_key(self, root_key):
         self._root_key = root_key
+
+    def add_metadata(self, key, value):
+        self._metadata[key] = value
+
+    @property
+    def metadata(self):
+        return self._metadata
 
     def __iter__(self):
         for node in self._root:
@@ -334,6 +357,8 @@ class ShardTrie():
                         yielded_count += 1
                         yield n
 
+    def get_last_node(self):
+        return self._root.get_last_node()
 
     def split_trie(self, key):
         """Splits the tree at key.
@@ -360,7 +385,9 @@ class ShardTrie():
                 subtrie.root.parent = node.parent
 
     def dump(self):
-        return self._root.dump()
+        data = self._root.dump()
+        data['metadata'] = self._metadata
+        return data
 
     def dump_to_json(self):
         return json.dumps(self.dump())
@@ -392,6 +419,7 @@ class ShardTrie():
             if key not in node_dict:
                 raise ShardTrieException('Malformed ShardTrie node dictionary')
 
+        metadata = node_dict.get('metadata', {})
         node = Node(node_dict['key'], level=node_dict.get('level', 1))
         node.data = node_dict['data']
         node.timestamp = node_dict.get('timestamp')
@@ -405,7 +433,7 @@ class ShardTrie():
             node.children[child_node._root.key] = child_node._root
             node.children[child_node._root.key].parent = node
 
-        return ShardTrie(root_node=node)
+        return ShardTrie(root_node=node, metadata=metadata)
 
     @staticmethod
     def load_from_json(json_string):
@@ -425,7 +453,6 @@ class ShardTrie():
         if results:
             return sorted(results, reverse=True)
         return results
-
 
 def to_shard_trie(trie):
     """

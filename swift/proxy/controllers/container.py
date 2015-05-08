@@ -21,7 +21,7 @@ from itertools import chain
 
 from swift.common.utils import public, csv_append, Timestamp, \
     is_container_sharded, config_true_value
-from swift.common.constraints import check_metadata
+from swift.common.constraints import check_metadata, CONTAINER_LISTING_LIMIT
 from swift.common import constraints, wsgi, shardtrie
 from swift.common.http import HTTP_ACCEPTED, is_success
 from swift.common.request_helpers import get_listing_content_type, \
@@ -96,29 +96,31 @@ class ContainerController(Controller):
         listing_content_type = get_listing_content_type(req)
 
         responses = list()
+        dist_nodes = list()
         iterator_func = 'get_important_nodes'
         if req.method == "HEAD":
             iterator_func = 'get_distributed_nodes'
 
+        def _get_trie(node, marker=None):
+            acct, cont = get_container_shard_path(self.account_name,
+                                                  self.container_name,
+                                                  node.key)
+            new_trie, new_resp = self.get_shard_trie(req, acct, cont,
+                                                     marker=marker)
+            responses.append(new_resp)
+            return trie
+
         def _get_nodes_from_trie(shard_trie):
-            resps = list()
             objects = list()
             for node in getattr(shard_trie,  iterator_func)(**req.str_params):
                 if node.is_distributed():
-                    acct, cont = get_container_shard_path(self.account_name,
-                                                          self.container_name,
-                                                          node.key)
-                    new_trie, resp = self.get_shard_trie(req,
-                                                          self.account_name,
-                                                          self.container_name)
-                    #if not is_success(resp.status_int):
-                    #    return HTTPServerError('failed')
-                    if new_trie.root_key == shard_trie.root_key:
-                        raise HTTPServerError('Loop detected in distributed '
-                                              'shard tree')
-                    responses.append(resp)
-                    tmp_resps, tmp_obs = _get_nodes_from_trie(new_trie)
-                    resps.extend(tmp_resps)
+                    if node.key in dist_nodes:
+                        # Now that we grab CONTAINER_LISTING_LIMIT objects
+                        # at a time, we may hit the same dist node more then
+                        # once.
+                        continue
+                    new_trie = _get_trie(node)
+                    tmp_obs = _get_nodes_from_trie(new_trie)
                     objects.extend(tmp_obs)
                 else:
                     # is a data node
@@ -140,7 +142,16 @@ class ContainerController(Controller):
                         objects.append(xml % obj)
                     else:
                         objects.append(obj['name'] + '\n')
-            return resps, objects
+
+            if shard_trie.metadata.get('data_node_count'):
+                if shard_trie.metadata['data_node_count'] == \
+                        CONTAINER_LISTING_LIMIT:
+                    # There is probably more items in the trie
+                    new_trie = _get_trie(shard_trie.root,
+                                         marker=trie.get_last_node().key)
+                    tmp_obs = _get_nodes_from_trie(new_trie)
+                    objects.extend(tmp_obs)
+            return objects
 
         # First run the command on the current container
         trie, resp = self.get_shard_trie(req, self.account_name,
@@ -151,10 +162,9 @@ class ContainerController(Controller):
 
         # Now run it on all shards so parse trie
         try:
-            new_responses, objects = _get_nodes_from_trie(trie)
+            objects = _get_nodes_from_trie(trie)
         except HTTPServerError as server_error:
             return server_error
-        responses.extend(new_responses)
 
         # now we can build the response
         resp_status = 500

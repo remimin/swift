@@ -1338,7 +1338,7 @@ class Controller(object):
         else:
             self.app.logger.warning('Could not autocreate account %r' % path)
 
-    def get_shard_trie(self, req, account_name, container_name):
+    def get_shard_trie(self, req, account_name, container_name, marker=None):
         part = self.app.container_ring.get_part(
             account_name, container_name)
         node_iter = self.app.iter_nodes(self.app.container_ring, part)
@@ -1351,6 +1351,8 @@ class Controller(object):
             environ['QUERY_STRING'] = "format=trie&trie_nodes=distributed"
         else:
             environ['QUERY_STRING'] = "format=trie"
+        if marker:
+            environ['QUERY_STRING'] += '&marker=%s' % quote(marker)
         environ['REQUEST_METHOD'] = 'GET'
         environ['HTTP_ACCEPT'] = 'application/trie'
         environ.pop('PATH_INFO')

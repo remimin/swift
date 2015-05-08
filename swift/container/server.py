@@ -496,7 +496,8 @@ class ContainerController(BaseStorageServer):
             # dump to trie to the body so grab the trie
             try:
                 dist_only = req.params.get('trie_nodes', '') == 'distributed'
-                trie, _errors = broker.build_shard_trie(dist_only)
+                trie, _errors = broker.build_shard_trie(dist_only,
+                                                        marker=marker)
             except Exception as ex:
                 pass
             if broker.metadata.get('X-Container-Sysmeta-Shard-Container'):
