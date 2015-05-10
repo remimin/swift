@@ -456,7 +456,7 @@ class ShardTrie():
                 child['level'] = node.level + 1
 
             child_node = ShardTrie.load(child)
-            child_node.parent = node
+            child_node._parent = node
             node.children[child_node._root.key] = child_node._root
             node.children[child_node._root.key].parent = node
 

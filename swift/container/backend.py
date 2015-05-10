@@ -476,9 +476,10 @@ class ContainerBroker(DatabaseBroker):
             return data
 
     def build_shard_trie(self, policy_index=0, distributed_only=False,
-                         marker=None, limit=None):
+                         marker=None, end_marker=None, limit=None):
         limit = limit if limit else CONTAINER_LISTING_LIMIT
         marker = '' if not marker else marker
+        end_marker = '' if not  end_marker else end_marker
         trie = shardtrie.ShardTrie()
         errors = []
         count = 0
@@ -502,12 +503,12 @@ class ContainerBroker(DatabaseBroker):
                     trie.add(extra_node[0], timestamp=extra_node[1],
                              flag=extra_node[2])
             except shardtrie.ShardTrieDistributedBranchException as ex:
-                # distibuted node beyond a distributed node.. broken tree, so
+                # distributed node beyond a distributed node.. broken tree, so
                 # add the ndoe to errors.
                 errors.append((extra_node, ex.node))
         if not distributed_only:
             for obj in self.list_objects_iter(
-                    limit, marker, '', '', '',
+                    limit, marker, end_marker, '', '',
                     storage_policy_index=policy_index):
                 try:
                     data = dict(size=obj[2], content_type=obj[3],

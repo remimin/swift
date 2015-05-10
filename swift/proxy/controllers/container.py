@@ -95,39 +95,64 @@ class ContainerController(Controller):
         # to generate the account name and container name etc.
         listing_content_type = get_listing_content_type(req)
         req_marker = get_param(req, 'marker', '')
+        req_end_marker = get_param(req, 'end_marker', '')
+        objs_to_get = get_param(req, 'limit', '')
+
+        if not  objs_to_get:
+            objs_to_get = CONTAINER_LISTING_LIMIT
+
+        if not isinstance(objs_to_get, int):
+            try:
+                objs_to_get = int(objs_to_get)
+            except ValueError:
+                objs_to_get = CONTAINER_LISTING_LIMIT
 
         responses = list()
         dist_nodes = list()
-        objs_to_get = CONTAINER_LISTING_LIMIT
         iterator_func = 'get_important_nodes'
         if req.method == "HEAD":
             iterator_func = 'get_distributed_nodes'
 
-        def _get_trie(node, marker=None, limit=None):
+        def _get_trie(node, marker=None, end_marker=None, limit=None):
             acct, cont = get_container_shard_path(self.account_name,
                                                   self.container_name,
-                                                  node.key)
+                                                  node.full_key())
             new_trie, new_resp = self.get_shard_trie(req, acct, cont,
-                                                     marker=marker, limit=limit)
+                                                     marker=marker,
+                                                     end_marker=end_marker,
+                                                     limit=limit)
             responses.append(new_resp)
-            return trie
+            return new_trie
 
-        def _get_nodes_from_trie(shard_trie, marker=None,
+        def _get_nodes_from_trie(shard_trie, marker=None, end_marker=None,
                                  limit=CONTAINER_LISTING_LIMIT):
             objects = list()
-            for node in getattr(shard_trie,  iterator_func)(**req.str_params):
+            breakout = False
+            for node in getattr(shard_trie, iterator_func)():
                 if node.is_distributed():
                     if node.key in dist_nodes:
                         # Now that we grab CONTAINER_LISTING_LIMIT objects
                         # at a time, we may hit the same dist node more then
                         # once.
                         continue
-                    new_trie = _get_trie(node, marker=marker, limit=limit)
-                    tmp_obs = _get_nodes_from_trie(new_trie)
+                    new_trie = _get_trie(node, marker=marker,
+                                         end_marker=end_marker, limit=limit)
+                    tmp_obs, limit, breakout = _get_nodes_from_trie(
+                        new_trie, marker=marker, end_marker=end_marker,
+                        limit=limit)
                     objects.extend(tmp_obs)
+                    if breakout:
+                        return objects, limit, breakout
                 else:
                     # is a data node, and therefore, marker has been found
                     marker = None
+                    if end_marker:
+                        if end_marker == node.full_key():
+                            breakout = True
+                    if limit == 0:
+                        breakout = True
+                    if breakout:
+                        return objects, limit, breakout
                     obj = dict(
                         hash=node.data['etag'],
                         bytes=node.data['size'],
@@ -156,20 +181,23 @@ class ContainerController(Controller):
             #                             marker=trie.get_last_node().key)
             #        tmp_obs = _get_nodes_from_trie(new_trie)
             #        objects.extend(tmp_obs)
-            return objects
+            return objects, limit, breakout
 
         # First run the command on the current container
         trie, resp = self.get_shard_trie(req, self.account_name,
                                          self.container_name,
-                                         marker=req_marker)
+                                         marker=req_marker,
+                                         end_marker=req_end_marker,
+                                         limit=objs_to_get)
         if not is_success(resp.status_int):
             return resp
         responses.append(resp)
 
         # Now run it on all shards so parse trie
         try:
-            objects = _get_nodes_from_trie(trie, marker=req_marker,
-                                           limit=objs_to_get)
+            objects, _limit, _breakout = _get_nodes_from_trie(
+                trie, marker=req_marker, end_marker=req_end_marker,
+                limit=objs_to_get)
         except HTTPServerError as server_error:
             return server_error
 
@@ -365,7 +393,7 @@ class ContainerController(Controller):
         for node in trie.get_distributed_nodes():
             acct, cont = get_container_shard_path(self.account_name,
                                                   self.container_name,
-                                                  node.key)
+                                                  node.full_key())
             next_trie, _resp = self.get_shard_trie(req, acct, cont)
             resp = self._delete_shards(next_trie, req)
 
@@ -387,7 +415,7 @@ class ContainerController(Controller):
         if deleted_nodes:
             # Send a post to container to remove these nodes from trie.
             # If root, then use self.container_name etc.
-            prefix = None if root else trie.key
+            prefix = None if root else trie.root_key
             acct, cont = get_container_shard_path(self.account_name,
                                                   self.container_name,
                                                   prefix)

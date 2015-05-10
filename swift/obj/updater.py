@@ -211,7 +211,7 @@ class ObjectUpdater(Daemon):
 
     def _find_shard_path(self, trie, update_dict, client):
         prefix = self._get_shard_node(trie, update_dict['obj'],
-                                                      client)
+                                      client)
         if prefix:
             acct, cont = get_container_shard_path(update_dict['account'],
                                                   update_dict['container'],
