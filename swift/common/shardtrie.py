@@ -64,6 +64,12 @@ class Node():
     def key(self, key):
         self._key = key
 
+    def full_key(self):
+        if self.parent:
+            return self.parent.full_key() + self._key
+        else:
+            return self._key
+
     @property
     def data(self):
         return self._data
@@ -122,6 +128,7 @@ class Node():
         new_node.timestamp = Timestamp(time.time()).internal
         new_node.flag = DISTRIBUTED_BRANCH
         self.parent.children[self.key] = new_node
+        self._key = self.full_key()
         self._parent = None
         return self
 
@@ -149,20 +156,29 @@ class Node():
         return count
 
     def add(self, key, data=None, timestamp=None, flag=DATA_PRESENT):
-        key_len = len(self.key)
+        key_len = len(key)
+        full_key_len = self.level - 1
+
         if not timestamp:
             timestamp = Timestamp(time.time()).internal
         if self.flag == DISTRIBUTED_BRANCH:
+            fullkey = self.full_key()
             raise ShardTrieDistributedBranchException(
-                "Subtree '%s' has been distributed." % self.key, self.key,
+                "Subtree '%s' has been distributed." % fullkey, fullkey,
                 self)
-        elif self.key == key:
+        elif full_key_len == key_len and self.key[-1] == key[-1]:
+            # lets double check the value in case something bad has happened
+            fullkey = self.full_key()
+            if key != fullkey:
+                raise ShardTrieException("Found key %s, but it doesn't match"
+                                         " %s something weird is going on",
+                                         key, fullkey)
             self.timestamp = timestamp
             self.data = data
             self.flag = flag
             return True
-        elif key_len < len(key):
-            next_key = key[:key_len + 1]
+        elif full_key_len < key_len:
+            next_key = key[full_key_len]
             if next_key not in self.children:
                 # node doesn't exit, so create it.
                 new_node = Node(next_key, parent=self,
@@ -172,16 +188,22 @@ class Node():
             return self.children[next_key].add(key, data, timestamp, flag)
 
     def get_node(self, key):
-        key_len = len(self.key)
+        key_len = len(key)
+        full_key_len = self.level - 1
 
-        if self.key == key:
+        if full_key_len == key_len and self.key[-1] == key[-1]:
+            fullkey = self.full_key()
+            if key != fullkey:
+                raise ShardTrieException("Found key %s, but it doesn't match"
+                                         " %s something weird is going on",
+                                         key, fullkey)
             return self
         elif self.flag == DISTRIBUTED_BRANCH:
             raise ShardTrieDistributedBranchException(
                 "Subtree '%s' has been distributed." % (self.key), self.key,
                 self)
-        elif key_len < len(key):
-            next_key = key[:key_len + 1]
+        elif full_key_len < key_len:
+            next_key = key[full_key_len]
             if next_key not in self.children:
                 return None
 
@@ -381,7 +403,9 @@ class ShardTrie():
         node = self.get_node(key)
         if node:
             if node.is_distributed() or force:
-                node.parent.children[key] = subtrie.root
+                new_key = subtrie.root[-1]
+                node.parent.children[new_key] = subtrie.root
+                subtrie.root.key = new_key
                 subtrie.root.parent = node.parent
 
     def dump(self):
@@ -409,6 +433,9 @@ class ShardTrie():
                 break
 
         if new_root:
+            # We need to make sure the new root has the correct key (more then
+            # a single character).
+            new_root.key = new_root.full_key()
             self._root = new_root
             self._root.parent = None
 

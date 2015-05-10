@@ -25,7 +25,7 @@ from swift.common.constraints import check_metadata, CONTAINER_LISTING_LIMIT
 from swift.common import constraints, wsgi, shardtrie
 from swift.common.http import HTTP_ACCEPTED, is_success
 from swift.common.request_helpers import get_listing_content_type, \
-    get_container_shard_path, get_sys_meta_prefix
+    get_container_shard_path, get_sys_meta_prefix, get_param
 from swift.common.shardtrie import to_shard_trie
 from swift.proxy.controllers.base import Controller, delay_denial, \
     cors_validation, clear_info_cache
@@ -94,23 +94,26 @@ class ContainerController(Controller):
         # TODO: build a new respose, loop through the tree. But first need utils
         # to generate the account name and container name etc.
         listing_content_type = get_listing_content_type(req)
+        req_marker = get_param(req, 'marker', '')
 
         responses = list()
         dist_nodes = list()
+        objs_to_get = CONTAINER_LISTING_LIMIT
         iterator_func = 'get_important_nodes'
         if req.method == "HEAD":
             iterator_func = 'get_distributed_nodes'
 
-        def _get_trie(node, marker=None):
+        def _get_trie(node, marker=None, limit=None):
             acct, cont = get_container_shard_path(self.account_name,
                                                   self.container_name,
                                                   node.key)
             new_trie, new_resp = self.get_shard_trie(req, acct, cont,
-                                                     marker=marker)
+                                                     marker=marker, limit=limit)
             responses.append(new_resp)
             return trie
 
-        def _get_nodes_from_trie(shard_trie):
+        def _get_nodes_from_trie(shard_trie, marker=None,
+                                 limit=CONTAINER_LISTING_LIMIT):
             objects = list()
             for node in getattr(shard_trie,  iterator_func)(**req.str_params):
                 if node.is_distributed():
@@ -119,17 +122,18 @@ class ContainerController(Controller):
                         # at a time, we may hit the same dist node more then
                         # once.
                         continue
-                    new_trie = _get_trie(node)
+                    new_trie = _get_trie(node, marker=marker, limit=limit)
                     tmp_obs = _get_nodes_from_trie(new_trie)
                     objects.extend(tmp_obs)
                 else:
-                    # is a data node
+                    # is a data node, and therefore, marker has been found
+                    marker = None
                     obj = dict(
                         hash=node.data['etag'],
                         bytes=node.data['size'],
                         content_type=node.data['content_type'],
                         last_modified=node.timestamp,
-                        name=node.key
+                        name=node.full_key()
                     )
                     if 'json' in listing_content_type:
                         objects.append(obj)
@@ -142,27 +146,30 @@ class ContainerController(Controller):
                         objects.append(xml % obj)
                     else:
                         objects.append(obj['name'] + '\n')
+                    limit -= 1
 
-            if shard_trie.metadata.get('data_node_count'):
-                if shard_trie.metadata['data_node_count'] == \
-                        CONTAINER_LISTING_LIMIT:
+            #if shard_trie.metadata.get('data_node_count'):
+            #    if shard_trie.metadata['data_node_count'] == \
+            #            CONTAINER_LISTING_LIMIT:
                     # There is probably more items in the trie
-                    new_trie = _get_trie(shard_trie.root,
-                                         marker=trie.get_last_node().key)
-                    tmp_obs = _get_nodes_from_trie(new_trie)
-                    objects.extend(tmp_obs)
+            #        new_trie = _get_trie(shard_trie.root,
+            #                             marker=trie.get_last_node().key)
+            #        tmp_obs = _get_nodes_from_trie(new_trie)
+            #        objects.extend(tmp_obs)
             return objects
 
         # First run the command on the current container
         trie, resp = self.get_shard_trie(req, self.account_name,
-                                         self.container_name)
+                                         self.container_name,
+                                         marker=req_marker)
         if not is_success(resp.status_int):
             return resp
         responses.append(resp)
 
         # Now run it on all shards so parse trie
         try:
-            objects = _get_nodes_from_trie(trie)
+            objects = _get_nodes_from_trie(trie, marker=req_marker,
+                                           limit=objs_to_get)
         except HTTPServerError as server_error:
             return server_error
 

@@ -476,22 +476,38 @@ class ContainerBroker(DatabaseBroker):
             return data
 
     def build_shard_trie(self, policy_index=0, distributed_only=False,
-                         marker=None):
+                         marker=None, limit=None):
+        limit = limit if limit else CONTAINER_LISTING_LIMIT
         marker = '' if not marker else marker
         trie = shardtrie.ShardTrie()
         errors = []
         count = 0
         for extra_node in self.get_shard_nodes():
             try:
-                trie.add(extra_node[0], timestamp=extra_node[1],
-                         flag=extra_node[2])
+                if marker:
+                    if extra_node[0] >= marker:
+                        trie.add(extra_node[0], timestamp=extra_node[1],
+                                 flag=extra_node[2])
+                    elif len(extra_node[0]) < len(marker) and \
+                            marker.startswith(extra_node[0]):
+                        trie.add(extra_node[0], timestamp=extra_node[1],
+                                 flag=extra_node[2])
+                    else:
+                        # Distributed node lies before the marker, so don't add
+                        # it otherwise it could cause a loop, or at least
+                        # needless sub requests
+                        pass
+                else:
+                    # no marker so add all nodes
+                    trie.add(extra_node[0], timestamp=extra_node[1],
+                             flag=extra_node[2])
             except shardtrie.ShardTrieDistributedBranchException as ex:
                 # distibuted node beyond a distributed node.. broken tree, so
                 # add the ndoe to errors.
                 errors.append((extra_node, ex.node))
         if not distributed_only:
             for obj in self.list_objects_iter(
-                    CONTAINER_LISTING_LIMIT, marker, '', '', '',
+                    limit, marker, '', '', '',
                     storage_policy_index=policy_index):
                 try:
                     data = dict(size=obj[2], content_type=obj[3],
