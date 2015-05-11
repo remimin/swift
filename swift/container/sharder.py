@@ -168,21 +168,21 @@ class ContainerSharder(ContainerReplicator):
             node = trie[key]
             return trie.root_key
         except ShardTrieDistributedBranchException as ex:
-            dist_key = ex.node.root_key
+            dist_key = ex.key
             if dist_key in trie_cache:
                 new_trie = trie_cache[dist_key]
             else:
                 acct, cont = get_container_shard_path(account, container,
                                                       dist_key)
-                path = self.swift.make_path(acct, cont) + '?format=trie'
-                try:
-                    resp = self.swift.make_request('GET', path,
-                                                   acceptable_statuses=(2,))
-                except Exception as ex:
-                    # ATM using exception for debugging purposes, lock this
-                    # down later
-                    pass
+                path = self.swift.make_path(acct, cont) + \
+                    '?format=trie&trie_nodes=distributed'
+                headers = {'X-Skip-Sharding': 'On'}
+                resp = self.swift.make_request('GET', path, headers,
+                                               acceptable_statuses=(2,))
                 new_trie = to_shard_trie(resp.body)
+                if new_trie.is_empty():
+                    new_trie._root._key = ex.key
+                new_trie.trim_trunk()
                 trie_cache[dist_key] = new_trie
             return self._find_shard_container_prefix(new_trie, key, account,
                                                      container, trie_cache)
@@ -241,7 +241,7 @@ class ContainerSharder(ContainerReplicator):
         if isinstance(objs_or_trie, ShardTrie):
             for node in objs_or_trie.get_important_nodes():
                 if node.flag == DISTRIBUTED_BRANCH:
-                    obj = {'name': node.key,
+                    obj = {'name': node.full_key(),
                            'created_at': timestamp or node.timestamp,
                            'size': 0,
                            'content_type': '',
@@ -250,7 +250,7 @@ class ContainerSharder(ContainerReplicator):
                            'storage_policy_index': policy_index,
                            'record_type': RECORD_TYPE_TRIE_NODE}
                 else:
-                    obj = {'name': node.key,
+                    obj = {'name': node.full_key(),
                            'created_at': timestamp or node.timestamp,
                            'size': node.data['size'],
                            'content_type': node.data['content_type'],
@@ -342,15 +342,15 @@ class ContainerSharder(ContainerReplicator):
         """
         trie_cache = {}
         shard_prefix_to_obj = {}
-        for obj, node in misplaced:
-            prefix = self._find_shard_container_prefix(trie, obj[0], trie_cache,
-                                                       account, container)
+        for obj, _node in misplaced:
+            prefix = self._find_shard_container_prefix(trie, obj[0], account,
+                                                       container, trie_cache)
             if shard_prefix_to_obj.get(prefix):
                 shard_prefix_to_obj[prefix].append(obj)
             else:
-                shard_prefix_to_obj[prefix] = list().append(obj)
+                shard_prefix_to_obj[prefix] = [obj]
 
-        self.logger.info(_('preparing to move misplaced objects found'
+        self.logger.info(_('preparing to move misplaced objects found '
                            'in %s/%s'), account, container)
         for shard_prefix, obj_list in shard_prefix_to_obj.iteritems():
             part, broker, node_id = self._get_and_fill_shard_broker(
@@ -441,7 +441,7 @@ class ContainerSharder(ContainerReplicator):
                 continue
             root_account, root_container = \
                 ContainerSharder.get_shard_root_path(broker)
-            trie, misplaced = broker.build_shard_trie()
+            trie, misplaced = broker.build_full_shard_trie()
             if root_container != broker.container:
                 # This node isn't the root node, so trim the trunk
                 trie.trim_trunk()
@@ -473,9 +473,9 @@ class ContainerSharder(ContainerReplicator):
                                           'something is screwy'))
                     continue
                 self.logger.info(_('sharding subtree of size %d on at prefix '
-                                   '%s on container %s'), size, node.key,
+                                   '%s on container %s'), size, node.full_key(),
                                  broker.container)
-                split_trie = trie.split_trie(node.key)
+                split_trie = trie.split_trie(node.full_key())
 
                 try:
                     part, new_broker, node_id = self._get_and_fill_shard_broker(
@@ -511,7 +511,7 @@ class ContainerSharder(ContainerReplicator):
                                                    delete=True,
                                                    timestamp=timestamp)
                 # Make sure the new distributed node has been added.
-                dist_node = trie[node.key]
+                dist_node = trie[node.full_key()]
                 items += self._generate_object_list(
                     ShardTrie(root_node=dist_node), 0)
                 broker.merge_items(items)

@@ -665,11 +665,9 @@ class ObjectController(BaseStorageServer):
             'x-size': metadata['Content-Length'],
             'x-content-type': metadata['Content-Type'],
             'x-timestamp': metadata['X-Timestamp'],
-            'x-etag': metadata['ETag'],
-            'x-shard-account':
-                request.headers.get('X-Backend-Shard-Account'),
-            'x-shard-container':
-                request.headers.get('X-Backend-Shard-Container')})
+            'x-etag': metadata['ETag']})
+        account = request.headers.get('X-Backend-Shard-Account', account)
+        container = request.headers.get('X-Backend-Shard-Container', container)
         # apply any container update header overrides sent with request
         self._check_container_override(update_headers, request.headers)
         self._check_container_override(update_headers, footer_meta)
@@ -849,6 +847,9 @@ class ObjectController(BaseStorageServer):
                                   policy)
         if orig_timestamp < req_timestamp:
             disk_file.delete(req_timestamp)
+            account = request.headers.get('X-Backend-Shard-Account', account)
+            container = request.headers.get('X-Backend-Shard-Container',
+                                            container)
             self.container_update(
                 'DELETE', account, container, obj, request,
                 HeaderKeyDict({'x-timestamp': req_timestamp.internal}),

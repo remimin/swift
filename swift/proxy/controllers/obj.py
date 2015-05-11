@@ -240,6 +240,9 @@ class BaseObjectController(Controller):
                                                   self.container_name,
                                                   ex.key)
             new_trie, _resp = self.get_shard_trie(req, acct, cont)
+            if new_trie.is_empty():
+                # its a subtrie will no distributed
+                new_trie._root._key = ex.key
             new_trie.trim_trunk()
             return self._get_shard_node(req, new_trie)
 
@@ -274,9 +277,9 @@ class BaseObjectController(Controller):
             if aresp:
                 return aresp
 
-        if is_container_sharded(container_info):
-            self.account_name, self.container_name, req.path_info, \
-                = self._find_shard_path(req)
+        #if is_container_sharded(container_info):
+        #    self.account_name, self.container_name, req.path_info, \
+        #        = self._find_shard_path(req)
         partition = obj_ring.get_part(
             self.account_name, self.container_name, self.object_name)
         node_iter = self.app.iter_nodes(obj_ring, partition)
@@ -943,6 +946,15 @@ class BaseObjectController(Controller):
         container_info = self.container_info(
             self.account_name, self.container_name, req)
 
+        req.acl = container_info['write_acl']
+        req.environ['swift_sync_key'] = container_info['sync_key']
+
+        policy_index = req.headers.get('X-Backend-Storage-Policy-Index',
+                                       container_info['storage_policy'])
+        obj_ring = self.app.get_object_ring(policy_index)
+        partition, nodes = obj_ring.get_nodes(
+            self.account_name, self.container_name, self.object_name)
+
         # in case the object has been sharded to a new container
         if is_container_sharded(container_info):
             shard_acct, shard_cont, shard_path = \
@@ -951,18 +963,14 @@ class BaseObjectController(Controller):
             req.headers['X-Backend-Shard-Account'] = shard_acct
             req.headers['X-Backend-Shard-Container'] = shard_cont
 
-        policy_index = req.headers.get('X-Backend-Storage-Policy-Index',
-                                       container_info['storage_policy'])
-        obj_ring = self.app.get_object_ring(policy_index)
+            container_info = self.container_info(shard_acct, shard_cont, req)
+
         container_nodes = container_info['nodes']
         container_partition = container_info['partition']
-        partition, nodes = obj_ring.get_nodes(
-            self.account_name, self.container_name, self.object_name)
 
         # pass the policy index to storage nodes via req header
         req.headers['X-Backend-Storage-Policy-Index'] = policy_index
-        req.acl = container_info['write_acl']
-        req.environ['swift_sync_key'] = container_info['sync_key']
+
 
         # is request authorized
         if 'swift.authorize' in req.environ:
@@ -1025,18 +1033,24 @@ class BaseObjectController(Controller):
                                        container_info['storage_policy'])
         obj_ring = self.app.get_object_ring(policy_index)
 
-        # in case the object has been sharded to a new container
-        if is_container_sharded(container_info):
-            self.account_name, self.container_name, req.path_info = \
-                self._find_shard_path(container_info)
-
         # pass the policy index to storage nodes via req header
         req.headers['X-Backend-Storage-Policy-Index'] = policy_index
-        container_partition = container_info['partition']
-        containers = container_info['nodes']
         req.acl = container_info['write_acl']
         req.environ['swift_sync_key'] = container_info['sync_key']
         object_versions = container_info['versions']
+
+        # in case the object has been sharded to a new container
+        if is_container_sharded(container_info):
+            shard_acct, shard_cont, shard_path = \
+                self._find_shard_path(req)
+
+            req.headers['X-Backend-Shard-Account'] = shard_acct
+            req.headers['X-Backend-Shard-Container'] = shard_cont
+
+            container_info = self.container_info(shard_acct, shard_cont, req)
+
+        container_partition = container_info['partition']
+        containers = container_info['nodes']
         if 'swift.authorize' in req.environ:
             aresp = req.environ['swift.authorize'](req)
             if aresp:

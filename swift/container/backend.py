@@ -460,20 +460,38 @@ class ContainerBroker(DatabaseBroker):
             self.account = data['account']
             self.container = data['container']
 
-            # Commenting out adding the shard trie to info, to move it to the
-            # body. (gets to large for a valid header size).
-            #sharded = self.metadata.get('X-Container-Sysmeta-Sharding')
-            #if sharded:
-            #    # build the shard tree.
-            #    trie, _errors = self.build_shard_trie(
-            #        data['storage_policy_index'])
-            #    self.shard_trie = trie
-                # If the trie isn't the root, then trim the trunk, so we
-                # send back less junk.
-            #    if self.metadata.get('X-Container-Sysmeta-Shard-Container'):
-            #        trie.trim_trunk()
-            #    data['shardtrie'] = shard_trie_to_string(trie)
             return data
+
+    def build_full_shard_trie(self, policy_index=0):
+        trie = shardtrie.ShardTrie()
+        errors = list()
+        for extra_node in self.get_shard_nodes():
+            try:
+                trie.add(extra_node[0], timestamp=extra_node[1],
+                         flag=extra_node[2])
+            except shardtrie.ShardTrieDistributedBranchException as ex:
+                # distributed node beyond a distributed node.. broken tree, so
+                # add the ndoe to errors.
+                errors.append((extra_node, ex.node))
+
+        done = False
+        marker = ''
+        while not done:
+            count = 0
+            for obj in self.list_objects_iter(
+                    CONTAINER_LISTING_LIMIT, marker, '', '', '',
+                    storage_policy_index=policy_index):
+                try:
+                    data = dict(size=obj[2], content_type=obj[3],
+                                etag=obj[4])
+                    trie.add(obj[0], timestamp=obj[1], data=data)
+                except shardtrie.ShardTrieDistributedBranchException as ex:
+                    errors.append((obj, ex.node))
+                finally:
+                    count += 1
+                    marker=obj[0]
+            done = count < CONTAINER_LISTING_LIMIT
+        return trie, errors
 
     def build_shard_trie(self, policy_index=0, distributed_only=False,
                          marker=None, end_marker=None, limit=None):

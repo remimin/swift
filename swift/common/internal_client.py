@@ -178,6 +178,8 @@ class InternalClient(object):
                 if hasattr(body_file, 'seek'):
                     body_file.seek(0)
                 req.body_file = body_file
+            if 'X-Skip-Sharding' in headers:
+                req.environ['swift.skip_sharded'] = True
             try:
                 resp = req.get_response(self.app)
                 if resp.status_int in acceptable_statuses or \

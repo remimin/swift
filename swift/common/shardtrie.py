@@ -200,8 +200,8 @@ class Node():
             return self
         elif self.flag == DISTRIBUTED_BRANCH:
             raise ShardTrieDistributedBranchException(
-                "Subtree '%s' has been distributed." % (self.key), self.key,
-                self)
+                "Subtree '%s' has been distributed." % (self.full_key()),
+                self.full_key(), self)
         elif full_key_len < key_len:
             next_key = key[full_key_len]
             if next_key not in self.children:
@@ -317,6 +317,9 @@ class ShardTrie():
 
     def delete(self, key):
         return self._root.delete(key)
+
+    def is_empty(self):
+        return len(self.root_key) == 0 and len(self.root.children) == 0
 
     def get_data_nodes(self, key=None):
         """ Generator returning data only nodes.
@@ -447,7 +450,8 @@ class ShardTrie():
                 raise ShardTrieException('Malformed ShardTrie node dictionary')
 
         metadata = node_dict.get('metadata', {})
-        node = Node(node_dict['key'], level=node_dict.get('level', 1))
+        node = Node(node_dict['key'],
+                    level=node_dict.get('level', len(node_dict['key']) + 1))
         node.data = node_dict['data']
         node.timestamp = node_dict.get('timestamp')
         node.flag = node_dict.get('flag', EMPTY)
