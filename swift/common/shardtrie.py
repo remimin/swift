@@ -494,6 +494,128 @@ class ShardTrie():
         return results
 
 
+class CountingNode():
+    def __init__(self, key, parent, level, trie=None):
+        self._key = key
+        self._parent = parent
+        self._level = level
+        self._count = 0
+        self._children = dict()
+        self._distributed = False
+        self._trie = trie
+
+    def __repr__(self):
+        return "key: %s level: %d count: %d" % (self.full_key(), self._level,
+                                                self._count)
+
+    @property
+    def key(self):
+        return self._key
+
+    def full_key(self):
+        if self._parent is None:
+            return self._key
+        else:
+            return self._parent.full_key() + self._key
+
+    def remove(self, recursive=False):
+        if not recursive and len(self._children) > 0:
+            return False
+
+        for c in self._children.keys():
+            res = self._children[c].remove(recursive=recursive)
+            if not res:
+                return False
+
+        del self._parent._children[self._key]
+        self = None
+
+    def add(self, key, distributed=False, data=None):
+        node_key = self.full_key()
+        if key == node_key:
+            if distributed:
+                self.distributed = True
+                return 0
+            return 1
+        elif self._distributed:
+            self._trie.misplaced.append((key, self.full_key, data))
+            return 0, self.full_key
+        if len(node_key) < len(key):
+            next_key = key[len(node_key)]
+            if next_key not in self._children:
+                self._children[next_key] = CountingNode(next_key, self,
+                                                        self._level + 1,
+                                                        self._trie)
+            # deleted already visited children
+            for c in self._children.keys():
+                if c == next_key:
+                    continue
+                self._children[c].remove(recursive=True)
+
+            res = self._children[next_key].add(key, distributed)
+            self._count += res
+            if self._key != self._trie.root_key:
+                if self._count == self._trie.max_group_size:
+                    self._trie.new_candidate(self._level, self.full_key())
+            return res
+
+
+class CountingTrie():
+    """Counting prefix tree (trie)
+
+    This trie is a prefix trie, but is solely used to find the best candidate
+    sub tries for splitting. The trie doesn't actually store the leaf nodes, it
+    only increments counters on all nodes in the path of placing the object.
+    If a nodes count ever becomes > the max_group_size, then it calls the
+    new_candidate method which if it is of a higher level the the current best
+    candidate then will keep track of it.
+
+    To keep this memory effiecnt, when attempting to place an object, if there
+    are other children in any node that the current object is not using, they
+    are deleted. The means you must add objects to this trie in the correct
+    order. Which we do thanks to always building from a database.
+    """
+    def __init__(self, key='', max_group_size=500):
+        self._max_group_size = max_group_size
+        self._root = CountingNode(key, None, 0, self)
+        self._misplaced = list()
+        self._candidates = list()
+        self._highest_candidate_level = 0
+
+    @property
+    def max_group_size(self):
+        return self._max_group_size
+
+    @property
+    def misplaced(self):
+        return self._misplaced
+
+    @property
+    def candidates(self):
+        return self._candidates
+
+    @property
+    def root_key(self):
+        return self._root.key
+
+    def clear_misplaced(self):
+        self._misplaced = list()
+
+    def add(self, key, distributed=False, data=None):
+        self._root.add(key, distributed, data)
+
+    def new_candidate(self, level, key):
+        if level > self._highest_candidate_level:
+            self._highest_candidate_level = level
+            self._candidates = [key]
+        elif level == self._highest_candidate_level and \
+                key not in self._candidates:
+            self._candidates.append(key)
+
+    def get_best_candidates(self):
+        return self._highest_candidate_level, self._candidates
+
+
 def to_shard_trie(trie):
     """
     Helper method to turn the data returned from a GET to the container server

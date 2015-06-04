@@ -29,8 +29,8 @@ from swift.common.db import DatabaseAlreadyExists
 from swift.common.exceptions import DeviceUnavailable
 from swift.common.request_helpers import get_container_shard_path
 from swift.common.shardtrie import ShardTrieDistributedBranchException, \
-    ShardTrie, DISTRIBUTED_BRANCH, to_shard_trie
-from swift.common.constraints import SHARD_GROUP_COUNT
+    ShardTrie, DISTRIBUTED_BRANCH, to_shard_trie, CountingTrie
+from swift.common.constraints import SHARD_GROUP_COUNT, CONTAINER_LISTING_LIMIT
 from swift.common.ring.utils import is_local_device
 from swift.common.utils import get_logger, audit_location_generator, \
     config_true_value, dump_recon_cache, whataremyips, hash_path, \
@@ -160,6 +160,14 @@ class ContainerSharder(ContainerReplicator):
                 self._local_device_ids.add(node['id'])
         return results
 
+    def _get_shard_trie(self, account, container):
+        path = self.swift.make_path(acct, cont) + \
+            '?format=trie&trie_nodes=distributed'
+        headers = {'X-Skip-Sharding': 'On'}
+        resp = self.swift.make_request('GET', path, headers,
+                                       acceptable_statuses=(2,))
+        return to_shard_trie(resp.body)
+
     def _find_shard_container_prefix(self, trie, key, account, container,
                                      trie_cache):
         try:
@@ -172,12 +180,7 @@ class ContainerSharder(ContainerReplicator):
             else:
                 acct, cont = get_container_shard_path(account, container,
                                                       dist_key)
-                path = self.swift.make_path(acct, cont) + \
-                    '?format=trie&trie_nodes=distributed'
-                headers = {'X-Skip-Sharding': 'On'}
-                resp = self.swift.make_request('GET', path, headers,
-                                               acceptable_statuses=(2,))
-                new_trie = to_shard_trie(resp.body)
+                new_trie = self._get_shard_trie(acct, cont)
                 if new_trie.is_empty():
                     new_trie._root._key = ex.key
                 new_trie.trim_trunk()
@@ -220,7 +223,7 @@ class ContainerSharder(ContainerReplicator):
         return broker
 
     def _generate_object_list(self, objs_or_trie, policy_index, delete=False,
-                              timestamp=None):
+                              timestamp=None, filter_dist=False):
         """
         Create a list of dictionary items ready to be consumed by
         Broker.merge_items()
@@ -237,7 +240,11 @@ class ContainerSharder(ContainerReplicator):
         """
         objs = list()
         if isinstance(objs_or_trie, ShardTrie):
-            for node in objs_or_trie.get_important_nodes():
+            if filter_dist:
+                item_iter = objs_or_trie.get_data_nodes()
+            else:
+                item_iter = objs_or_trie.get_important_nodes()
+            for node in item_iter:
                 if node.flag == DISTRIBUTED_BRANCH:
                     obj = {'name': node.full_key(),
                            'created_at': timestamp or node.timestamp,
@@ -318,7 +325,8 @@ class ContainerSharder(ContainerReplicator):
             timestamp = Timestamp(time.time()).internal
             broker.update_metadata({
                 'X-Container-Sysmeta-Shard-Account': (account, timestamp),
-                'X-Container-Sysmeta-Shard-Container': (container, timestamp)})
+                'X-Container-Sysmeta-Shard-Container': (container, timestamp),
+                'X-Container-Sysmeta-Shard-Prefix': (prefix, timestamp)})
 
         objects = self._generate_object_list(objs_or_trie, policy_index,
                                              delete)
@@ -326,28 +334,34 @@ class ContainerSharder(ContainerReplicator):
 
         return self.shard_brokers[cont]
 
-    def _deal_with_misplaced_objects(self, broker, misplaced, trie, account,
+    def _deal_with_misplaced_objects(self, broker, misplaced, account,
                                      container, policy_index):
         """
 
         :param broker: The parent broker to update once misplaced objects have
                        been moved.
-        :param misplaced: The list of misplaced objects as returned by
-                          build_shard_trie
-        :param trie: The trie built from the broker
+        :param misplaced: The list of misplaced objects as defined by the
+                          CountingTrie
         :param account: The root account
         :param container: The root container
         :param policy_index: The policy index of the container
         """
         trie_cache = {}
         shard_prefix_to_obj = {}
-        for obj, _node in misplaced:
+
+        # Get root shard, in case the objects should be in a previous shard.
+        trie = self._get_shard_trie(account, container)
+        trie_cache[''] = trie
+
+        # [(key, self.full_key, data)]
+        # for obj, _node in misplaced:
+        for obj, dist_key, data in misplaced:
             prefix = self._find_shard_container_prefix(trie, obj[0], account,
                                                        container, trie_cache)
             if shard_prefix_to_obj.get(prefix):
-                shard_prefix_to_obj[prefix].append(obj)
+                shard_prefix_to_obj[prefix].append(data)
             else:
-                shard_prefix_to_obj[prefix] = [obj]
+                shard_prefix_to_obj[prefix] = [data]
 
         self.logger.info(_('preparing to move misplaced objects found '
                            'in %s/%s'), account, container)
@@ -435,25 +449,68 @@ class ContainerSharder(ContainerReplicator):
             if device not in local_devs:
                 continue
             broker = ContainerBroker(path)
-            if broker.metadata.get('X-Container-Sysmeta-Sharding') is None:
+            sharded = broker.metadata.get('X-Container-Sysmeta-Sharding') or \
+                broker.metadata.get('X-Container-Sysmeta-Shard-Account')
+            if not sharded:
                 # Not a shard container
                 continue
             root_account, root_container = \
                 ContainerSharder.get_shard_root_path(broker)
-            trie, misplaced = broker.build_full_shard_trie()
-            is_root = True
-            if root_container != broker.container:
+            prefix = broker.metadata.get('X-Container-Sysmeta-Shard-Prefix') \
+                or ''
+
+            is_root = root_container == broker.container
+
+            # Load everything into the count trie, starting with
+            # distributed nodes, as this will will also find us misplaced
+            # objects.
+            counting_trie = CountingTrie(prefix, self.shard_group_count)
+            self.logger.info(_('Starting scanning for best candidate subtree'
+                               ' to for sharing'))
+            for dist_item in broker.get_shard_nodes():
+                counting_trie.add(dist_item[0], distributed=True,
+                                  data=dist_item)
+
+            if is_root and counting_trie.misplaced:
+                # Clear misplaced items, because if there are any at this
+                # point, its because root contains all dist_nodes, even
+                # dist_nodes beyond others.
+                counting_trie.clear_misplaced()
+
+            # Now that they are loaded, misplaced objects will be captured
+            # inside CountingTrie along with the best candidates.
+            # Now lets add the objects.
+            marker = ''
+            done = False
+            obj_iter = broker.list_objects_iter(CONTAINER_LISTING_LIMIT,
+                                                marker, '', '', '')
+            while not done:
+                count = 0
+                for item in obj_iter:
+                    count += 1
+                    marker = item[0]
+                    counting_trie.add(item[0], data=item)
+                if count < CONTAINER_LISTING_LIMIT:
+                    done = True
+                else:
+                    obj_iter = broker.list_objects_iter(
+                        CONTAINER_LISTING_LIMIT, marker, '', '', '')
+            self.logger.info(_('Candidate subtree scan complete'))
+
+            #trie, misplaced = broker.build_full_shard_trie()
+            #is_root = True
+            #if root_container != broker.container:
                 # This node isn't the root node, so trim the trunk
-                trie.trim_trunk()
-                is_root = False
-            if misplaced:
+            #    trie.trim_trunk()
+            #    is_root = False
+            if counting_trie.misplaced:
                 # There are objects that shouldn't be in this trie, that is to
                 # say, they live beyond a distributed node, so we need to move
                 # them to the correct node.
-                self._deal_with_misplaced_objects(broker, misplaced, trie,
-                                                  root_account,
-                                                  root_container,
-                                                  broker.storage_policy_index)
+                self._deal_with_misplaced_objects(
+                    broker, counting_trie.misplaced, root_account,
+                    root_container, broker.storage_policy_index)
+
                 self.shard_brokers = dict()
                 self.shard_cleanups = dict()
 
@@ -465,19 +522,26 @@ class ContainerSharder(ContainerReplicator):
             # UPDATE: self.swift is an internal client, and
             #       self._find_shard_container_prefix will follow the
             #       ditributed path
-            candidate_subtries = \
-                trie.get_large_subtries(self.shard_group_count)
-            if candidate_subtries:
-                level, size, key, node = candidate_subtries[0]
+            if counting_trie.candidates:
+                candidate = counting_trie.candidates[0]
+                trie = broker.build_shard_trie(broker.storage_policy_index,
+                                               prefix=candidate)
+
+                node = trie[candidate]
                 if node.flag == DISTRIBUTED_BRANCH:
                     self.logger.warning(_('Best candidate for a shard trie '
                                           'starts with a distributed node, '
                                           'something is screwy'))
                     continue
-                self.logger.info(_('sharding subtree of size %d on at prefix '
-                                   '%s on container %s'), size,
-                                 node.full_key(), broker.container)
-                split_trie = trie.split_trie(key)
+                self.logger.info(_('sharding at container %s on prefix %s'),
+                                 broker.container, candidate)
+
+                marker = ''
+                if trie.metadata['data_node_count'] == \
+                        CONTAINER_LISTING_LIMIT:
+                    marker = trie.get_last_node()
+
+                split_trie = trie.split_trie(candidate)
 
                 try:
                     part, new_broker, node_id = \
@@ -488,6 +552,26 @@ class ContainerSharder(ContainerReplicator):
                     self.logger.warning(_(str(duex)))
                     continue
 
+                # there might be more then CONTAINER_LISTING_LIMIT items in the
+                # new shard, if so add all the objects to the shard database.
+                def add_other_nodes(marker, broker_to_update, delete=False,
+                                    timestamp=None, filter_dist=False):
+                    while marker:
+                        tmp_trie = broker.build_shard_trie(
+                            broker.storage_policy_index, marker=marker,
+                            prefix=candidate)
+
+                        objects = self._generate_object_list(
+                            tmp_trie, broker.storage_policy_index, delete,
+                            timestamp, filter_dist)
+                        broker_to_update.merge_items(objects)
+                        if tmp_trie.metadata['data_node_count'] == \
+                                CONTAINER_LISTING_LIMIT:
+                            marker = tmp_trie.get_last_node()
+                        else:
+                            marker = ''
+
+                add_other_nodes(marker, new_broker)
                 # Make sure the account exists by running a container PUT
                 try:
                     policy = POLICIES.get_by_index(broker.storage_policy_index)
@@ -516,11 +600,20 @@ class ContainerSharder(ContainerReplicator):
                 # Make sure the new distributed node has been added.
                 dist_node = trie[node.full_key()]
                 dist_node_item = self._generate_object_list(
-                    ShardTrie(root_node=dist_node), 0)
+                    ShardTrie(root_node=dist_node),
+                    broker.storage_policy_index, False)
                 items += dist_node_item
                 broker.merge_items(items)
 
-                if is_root:
+                # Again we might have to delete more then just the nodes found
+                # split trie.
+                if trie.metadata['data_node_count'] == \
+                        CONTAINER_LISTING_LIMIT:
+                    marker = trie.get_last_node()
+                    add_other_nodes(marker, broker, True, timestamp=timestamp,
+                                    filter_dist=True)
+
+                if not is_root:
                     # Push the new distributed node to the root container,
                     # we do this so we can short circuit PUTs.
                     part, root_broker, node_id = \

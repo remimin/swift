@@ -494,10 +494,11 @@ class ContainerBroker(DatabaseBroker):
 
     def build_shard_trie(self, policy_index=0, distributed_only=False,
                          marker=None, end_marker=None, limit=None,
-                         dist_error=True):
+                         dist_error=True, prefix=None):
         limit = limit if limit else CONTAINER_LISTING_LIMIT
         marker = '' if not marker else marker
         end_marker = '' if not end_marker else end_marker
+        prefix = '' if not prefix else prefix
         trie = shardtrie.ShardTrie()
         errors = []
         count = 0
@@ -527,7 +528,7 @@ class ContainerBroker(DatabaseBroker):
                 errors.append((extra_node, ex.node))
         if not distributed_only:
             for obj in self.list_objects_iter(
-                    limit, marker, end_marker, '', '',
+                    limit, marker, end_marker, prefix, '',
                     storage_policy_index=policy_index):
                 try:
                     data = dict(size=obj[2], content_type=obj[3],
