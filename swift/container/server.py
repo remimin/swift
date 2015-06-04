@@ -28,13 +28,13 @@ from swift.container.replicator import ContainerReplicatorRpc
 from swift.common.db import DatabaseAlreadyExists
 from swift.common.container_sync_realms import ContainerSyncRealms
 from swift.common.request_helpers import get_param, get_listing_content_type, \
-    split_and_validate_path, is_sys_or_user_meta, get_sys_meta_prefix
+    split_and_validate_path, is_sys_or_user_meta
 from swift.common.utils import get_logger, hash_path, public, \
     Timestamp, storage_directory, validate_sync_to, \
     config_true_value, json, timing_stats, replication, \
     override_bytes_from_content_type, get_log_line
 from swift.common.constraints import check_mount, valid_timestamp, check_utf8
-from swift.common import constraints, shardtrie
+from swift.common import constraints
 from swift.common.bufferedhttp import http_connect
 from swift.common.exceptions import ConnectionTimeout
 from swift.common.http import HTTP_NOT_FOUND, is_success
@@ -494,15 +494,21 @@ class ContainerController(BaseStorageServer):
         trie = None
         if out_content_type == 'application/trie':
             # dump to trie to the body so grab the trie
+            is_root = False
+            if broker.metadata.get('X-Container-Sysmeta-Shard-Container'):
+                is_root = True
+
             try:
+                dist_error = not is_root
                 dist_only = req.params.get('trie_nodes', '') == 'distributed'
                 trie, _errors = broker.build_shard_trie(dist_only,
                                                         marker=marker,
                                                         end_marker=end_marker,
-                                                        limit=limit)
-            except Exception as ex:
+                                                        limit=limit,
+                                                        dist_error=dist_error)
+            except Exception:
                 pass
-            if broker.metadata.get('X-Container-Sysmeta-Shard-Container'):
+            if not is_root:
                 trie.trim_trunk()
         resp_headers = gen_resp_headers(info, is_deleted=is_deleted)
         if is_deleted:

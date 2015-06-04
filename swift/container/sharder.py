@@ -21,11 +21,10 @@ from random import random
 
 from eventlet import Timeout, GreenPool
 
-import swift.common.db
 from swift.container.replicator import ContainerReplicator
 from swift.container.backend import ContainerBroker, DATADIR, \
     RECORD_TYPE_TRIE_NODE, RECORD_TYPE_OBJECT
-from swift.common import ring, internal_client, direct_client
+from swift.common import ring, internal_client
 from swift.common.db import DatabaseAlreadyExists
 from swift.common.exceptions import DeviceUnavailable
 from swift.common.request_helpers import get_container_shard_path
@@ -34,10 +33,8 @@ from swift.common.shardtrie import ShardTrieDistributedBranchException, \
 from swift.common.constraints import SHARD_GROUP_COUNT
 from swift.common.ring.utils import is_local_device
 from swift.common.utils import get_logger, audit_location_generator, \
-    config_true_value, dump_recon_cache, ratelimit_sleep, \
-    is_container_sharded, whataremyips, ismount, hash_path, \
+    config_true_value, dump_recon_cache, whataremyips, hash_path, \
     storage_directory, Timestamp
-from swift.common.daemon import Daemon
 from swift.common.wsgi import ConfigString
 from swift.common.storage_policy import POLICIES
 
@@ -88,6 +85,7 @@ use = egg:swift#proxy_logging
 use = egg:swift#catch_errors
 # See proxy-server.conf-sample for options
 """.lstrip()
+
 
 class ContainerSharder(ContainerReplicator):
     """Shards containers."""
@@ -165,7 +163,7 @@ class ContainerSharder(ContainerReplicator):
     def _find_shard_container_prefix(self, trie, key, account, container,
                                      trie_cache):
         try:
-            node = trie[key]
+            _node = trie[key]
             return trie.root_key
         except ShardTrieDistributedBranchException as ex:
             dist_key = ex.key
@@ -283,7 +281,7 @@ class ContainerSharder(ContainerReplicator):
                             'deleted': 1 if delete else 0,
                             'storage_policy_index': 0,
                             'record_type': RECORD_TYPE_TRIE_NODE})
-                except:
+                except Exception:
                     self.logger.warning(_("Failed to add object %s, not in the"
                                           'right format'),
                                         item[0] if item[0] else str(item))
@@ -315,14 +313,15 @@ class ContainerSharder(ContainerReplicator):
             self.logger.warning(_(str(duex)))
             return None
 
-        if not broker.metadata.get('X-Container-Sysmeta-Shard-Account'):
+        if not broker.metadata.get('X-Container-Sysmeta-Shard-Account') \
+                and prefix:
             timestamp = Timestamp(time.time()).internal
             broker.update_metadata({
                 'X-Container-Sysmeta-Shard-Account': (account, timestamp),
-                'X-Container-Sysmeta-Shard-Container': (container, timestamp),
-                'X-Container-Sysmeta-Sharding': ('On', timestamp)})
+                'X-Container-Sysmeta-Shard-Container': (container, timestamp)})
 
-        objects = self._generate_object_list(objs_or_trie, policy_index, delete)
+        objects = self._generate_object_list(objs_or_trie, policy_index,
+                                             delete)
         broker.merge_items(objects)
 
         return self.shard_brokers[cont]
@@ -442,9 +441,11 @@ class ContainerSharder(ContainerReplicator):
             root_account, root_container = \
                 ContainerSharder.get_shard_root_path(broker)
             trie, misplaced = broker.build_full_shard_trie()
+            is_root = True
             if root_container != broker.container:
                 # This node isn't the root node, so trim the trunk
                 trie.trim_trunk()
+                is_root = False
             if misplaced:
                 # There are objects that shouldn't be in this trie, that is to
                 # say, they live beyond a distributed node, so we need to move
@@ -464,23 +465,25 @@ class ContainerSharder(ContainerReplicator):
             # UPDATE: self.swift is an internal client, and
             #       self._find_shard_container_prefix will follow the
             #       ditributed path
-            candidate_subtries = trie.get_large_subtries(self.shard_group_count)
+            candidate_subtries = \
+                trie.get_large_subtries(self.shard_group_count)
             if candidate_subtries:
-                level, size, node = candidate_subtries[0]
+                level, size, key, node = candidate_subtries[0]
                 if node.flag == DISTRIBUTED_BRANCH:
                     self.logger.warning(_('Best candidate for a shard trie '
                                           'starts with a distributed node, '
                                           'something is screwy'))
                     continue
                 self.logger.info(_('sharding subtree of size %d on at prefix '
-                                   '%s on container %s'), size, node.full_key(),
-                                 broker.container)
-                split_trie = trie.split_trie(node.full_key())
+                                   '%s on container %s'), size,
+                                 node.full_key(), broker.container)
+                split_trie = trie.split_trie(key)
 
                 try:
-                    part, new_broker, node_id = self._get_and_fill_shard_broker(
-                        split_trie.root_key, split_trie, root_account,
-                        root_container, broker.storage_policy_index)
+                    part, new_broker, node_id = \
+                        self._get_and_fill_shard_broker(
+                            split_trie.root_key, split_trie, root_account,
+                            root_container, broker.storage_policy_index)
                 except DeviceUnavailable as duex:
                     self.logger.warning(_(str(duex)))
                     continue
@@ -488,7 +491,7 @@ class ContainerSharder(ContainerReplicator):
                 # Make sure the account exists by running a container PUT
                 try:
                     policy = POLICIES.get_by_index(broker.storage_policy_index)
-                    headers={'X-Storage-Policy': policy.name}
+                    headers = {'X-Storage-Policy': policy.name}
                     self.swift.create_container(new_broker.account,
                                                 new_broker.container,
                                                 headers=headers)
@@ -512,9 +515,23 @@ class ContainerSharder(ContainerReplicator):
                                                    timestamp=timestamp)
                 # Make sure the new distributed node has been added.
                 dist_node = trie[node.full_key()]
-                items += self._generate_object_list(
+                dist_node_item = self._generate_object_list(
                     ShardTrie(root_node=dist_node), 0)
+                items += dist_node_item
                 broker.merge_items(items)
+
+                if is_root:
+                    # Push the new distributed node to the root container,
+                    # we do this so we can short circuit PUTs.
+                    part, root_broker, node_id = \
+                        self._get_and_fill_shard_broker(
+                            '', dist_node_item, root_account, root_container,
+                            broker.storage_policy_index)
+                    self.cpool.spawn_n(
+                        self._replicate_object, part, root_broker.db_file,
+                        node_id)
+                    self.cpool.waitall()
+
                 self.logger.info(_('Finished sharding %s/%s, new shard '
                                    'container %s/%s. Sharded at prefix %s.'),
                                  broker.account, broker.container,
@@ -532,11 +549,6 @@ class ContainerSharder(ContainerReplicator):
         self.cpool.waitall()
 
         self.logger.info(_('Finished container sharding pass'))
-
-
-
-
-
 
         #all_locs = audit_location_generator(self.devices, DATADIR, '.db',
         #                                    mount_check=self.mount_check,

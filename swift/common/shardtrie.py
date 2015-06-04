@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Distributed prefix tree implementation classes used for container sharding"""
+"""Distributed prefix tree classes used for container sharding"""
 
 import time
 import json
@@ -155,13 +155,14 @@ class Node():
 
         return count
 
-    def add(self, key, data=None, timestamp=None, flag=DATA_PRESENT):
+    def add(self, key, data=None, timestamp=None, flag=DATA_PRESENT,
+            force=False):
         key_len = len(key)
         full_key_len = self.level - 1
 
         if not timestamp:
             timestamp = Timestamp(time.time()).internal
-        if self.flag == DISTRIBUTED_BRANCH:
+        if self.flag == DISTRIBUTED_BRANCH and not force:
             fullkey = self.full_key()
             raise ShardTrieDistributedBranchException(
                 "Subtree '%s' has been distributed." % fullkey, fullkey,
@@ -190,6 +191,7 @@ class Node():
     def get_node(self, key):
         key_len = len(key)
         full_key_len = self.level - 1
+        next_key = key[full_key_len]
 
         if full_key_len == key_len and self.key[-1] == key[-1]:
             fullkey = self.full_key()
@@ -199,11 +201,16 @@ class Node():
                                          key, fullkey)
             return self
         elif self.flag == DISTRIBUTED_BRANCH:
+            # We continue to check down the trie as the root node will
+            # hold all the DISTRIBUTED_NODES as to allow us to short circuit
+            # PUTs.
+            if next_key in self._children:
+                return self.children[next_key].get_node(key)
+
             raise ShardTrieDistributedBranchException(
                 "Subtree '%s' has been distributed." % (self.full_key()),
                 self.full_key(), self)
         elif full_key_len < key_len:
-            next_key = key[full_key_len]
             if next_key not in self.children:
                 return None
 
@@ -306,8 +313,9 @@ class ShardTrie():
         for node in self._root:
             yield node
 
-    def add(self, key, data=None, timestamp=None, flag=DATA_PRESENT):
-        return self._root.add(key, data, timestamp, flag)
+    def add(self, key, data=None, timestamp=None, flag=DATA_PRESENT,
+            force=False):
+        return self._root.add(key, data, timestamp, flag, force=force)
 
     def get(self, key, full=False):
         return self._root.get(key, full)
@@ -337,7 +345,8 @@ class ShardTrie():
                 if n.has_data():
                     yield n
 
-    def get_distributed_nodes(self, key=None, limit=None, marker=None, **kargs):
+    def get_distributed_nodes(self, key=None, limit=None, marker=None,
+                              **kargs):
         """Generator returning distributed tree nodes in the tree.
 
         :param key: The key pointing to the part of the tree to start the
@@ -442,7 +451,6 @@ class ShardTrie():
             self._root = new_root
             self._root.parent = None
 
-
     @staticmethod
     def load(node_dict):
         for key in ('parent', 'key', 'data', 'children', 'timestamp', 'flag'):
@@ -479,19 +487,20 @@ class ShardTrie():
         for node in self:
             data_count = node.count_data_nodes()
             if data_count > count and node.level > self.root.level:
-                results.append((node.level, data_count, node))
+                results.append((node.level, data_count, node.full_key(), node))
 
         if results:
             return sorted(results, reverse=True)
         return results
+
 
 def to_shard_trie(trie):
     """
     Helper method to turn the data returned from a GET to the container server
     with a format=trie info into a ShardTrie object. This is useful as the data
     passed back at the moment is json, but in future testing we may need to run
-    a compression algorithm on the json data. This method allows us to undo what
-    was done to reduce the response size.
+    a compression algorithm on the json data. This method allows us to undo
+    what was done to reduce the response size.
 
     :param trie: trie data as returned of the info; that is info['shardtrie']
     :return: a ShardTrie object
@@ -514,8 +523,9 @@ def shard_trie_to_string(trie):
     There is also a dump_to_zlib(level) method which zlib compresses the json
     dump.
 
-    Even though the dump to string/compress already exists, this helper function
-    is used in case we need to do more to it, and gives us one place to modify.
+    Even though the dump to string/compress already exists, this helper
+    function is used in case we need to do more to it, and gives us one
+    place to modify.
 
     :param trie: the ShardTrie object to convert to a string.
     :return: a json string.

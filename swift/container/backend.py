@@ -27,7 +27,6 @@ from swift.common import shardtrie
 from swift.common.constraints import CONTAINER_LISTING_LIMIT
 from swift.common.utils import Timestamp
 from swift.common.db import DatabaseBroker, utf8encode
-from swift.common.shardtrie import shard_trie_to_string
 
 
 SQLITE_ARG_LIMIT = 999
@@ -269,7 +268,7 @@ class ContainerBroker(DatabaseBroker):
                     flag INTEGER
                 );
             """)
-        except Exception as ex:
+        except Exception:
             pass
 
     def get_db_version(self, conn):
@@ -489,28 +488,30 @@ class ContainerBroker(DatabaseBroker):
                     errors.append((obj, ex.node))
                 finally:
                     count += 1
-                    marker=obj[0]
+                    marker = obj[0]
             done = count < CONTAINER_LISTING_LIMIT
         return trie, errors
 
     def build_shard_trie(self, policy_index=0, distributed_only=False,
-                         marker=None, end_marker=None, limit=None):
+                         marker=None, end_marker=None, limit=None,
+                         dist_error=True):
         limit = limit if limit else CONTAINER_LISTING_LIMIT
         marker = '' if not marker else marker
-        end_marker = '' if not  end_marker else end_marker
+        end_marker = '' if not end_marker else end_marker
         trie = shardtrie.ShardTrie()
         errors = []
         count = 0
         for extra_node in self.get_shard_nodes():
             try:
+                force = not dist_error
                 if marker:
                     if extra_node[0] >= marker:
                         trie.add(extra_node[0], timestamp=extra_node[1],
-                                 flag=extra_node[2])
+                                 flag=extra_node[2], force=force)
                     elif len(extra_node[0]) < len(marker) and \
                             marker.startswith(extra_node[0]):
                         trie.add(extra_node[0], timestamp=extra_node[1],
-                                 flag=extra_node[2])
+                                 flag=extra_node[2], force=force)
                     else:
                         # Distributed node lies before the marker, so don't add
                         # it otherwise it could cause a loop, or at least
@@ -519,7 +520,7 @@ class ContainerBroker(DatabaseBroker):
                 else:
                     # no marker so add all nodes
                     trie.add(extra_node[0], timestamp=extra_node[1],
-                             flag=extra_node[2])
+                             flag=extra_node[2], force=force)
             except shardtrie.ShardTrieDistributedBranchException as ex:
                 # distributed node beyond a distributed node.. broken tree, so
                 # add the ndoe to errors.
@@ -1100,6 +1101,6 @@ class ContainerBroker(DatabaseBroker):
                     'storage_policy_index': 0,
                     'record_type': RECORD_TYPE_TRIE_NODE}
                 result.append(obj)
-            except:
+            except Exception:
                 continue
         return result

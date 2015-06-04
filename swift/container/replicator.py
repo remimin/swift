@@ -31,9 +31,11 @@ from swift.common.db import DatabaseAlreadyExists
 from swift.common.utils import (json, Timestamp, hash_path,
                                 storage_directory, quorum_size)
 
+
 def other_items_hook(broker):
     trie_nodes = broker.get_all_shard_nodes_since()
     return broker.shard_nodes_to_items(trie_nodes)
+
 
 class ContainerReplicator(db_replicator.Replicator):
     server_type = 'container'

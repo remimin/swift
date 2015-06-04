@@ -819,6 +819,7 @@ class Request(object):
     charset = None
     _params_cache = None
     _timestamp = None
+
     def __init__(self, environ):
         self.environ = environ
         self.headers = HeaderEnvironProxy(self.environ)

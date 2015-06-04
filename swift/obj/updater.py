@@ -243,13 +243,17 @@ class ObjectUpdater(Daemon):
 
         # We need to find out if the container is sharded
         conf_path = self.conf.get('__file__') or \
-                    '/etc/swift/object-expirer.conf'
+            '/etc/swift/object-expirer.conf'
+
         # TODO set retries to somthing configurable below (not 3)
         client = internal_client.InternalClient(conf_path,
                                                 'Swift Object Updater', 3)
         metadata = client.get_container_metadata(update['account'],
                                                  update['container'])
-        if metadata.get('X-Backend-Shardtrie'):
+        if metadata.get('X-Container-Sysmeta-Sharding') or \
+                metadata.get('X-Container-Sysmeta-Shard-Account'):
+            # TODO, this is wrong now.. need to GET the container server
+            #       with a ?format=trie
             trie = metadata.get('X-Backend-Shardtrie')
             update['account'], update['container'] = \
                 self._find_shard_path(trie, update, client)

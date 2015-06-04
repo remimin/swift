@@ -22,17 +22,15 @@ from itertools import chain
 from swift.common.utils import public, csv_append, Timestamp, \
     is_container_sharded, config_true_value
 from swift.common.constraints import check_metadata, CONTAINER_LISTING_LIMIT
-from swift.common import constraints, wsgi, shardtrie
+from swift.common import constraints, wsgi
 from swift.common.http import HTTP_ACCEPTED, is_success
 from swift.common.request_helpers import get_listing_content_type, \
     get_container_shard_path, get_sys_meta_prefix, get_param
-from swift.common.shardtrie import to_shard_trie
 from swift.proxy.controllers.base import Controller, delay_denial, \
     cors_validation, clear_info_cache
 from swift.common.storage_policy import POLICIES
 from swift.common.swob import HTTPBadRequest, HTTPForbidden, \
-    HTTPNotFound, HTTPServerError, Response, Request
-
+    HTTPNotFound, HTTPServerError, Response
 
 
 class ContainerController(Controller):
@@ -91,14 +89,12 @@ class ContainerController(Controller):
         return None
 
     def GETorHEAD_sharded(self, req, container_info):
-        # TODO: build a new respose, loop through the tree. But first need utils
-        # to generate the account name and container name etc.
         listing_content_type = get_listing_content_type(req)
         req_marker = get_param(req, 'marker', '')
         req_end_marker = get_param(req, 'end_marker', '')
         objs_to_get = get_param(req, 'limit', '')
 
-        if not  objs_to_get:
+        if not objs_to_get:
             objs_to_get = CONTAINER_LISTING_LIMIT
 
         if not isinstance(objs_to_get, int):
@@ -240,7 +236,8 @@ class ContainerController(Controller):
         elif 'json' in listing_content_type:
             body = json.dumps(objects)
             resp_headers["content-length"] = str(len(body))
-            return Response(body=body, status=resp_status, headers=resp_headers)
+            return Response(body=body, status=resp_status,
+                            headers=resp_headers)
 
         content_length = sum(map(len, objects))
         resp_headers["content-length"] = str(content_length)
@@ -261,8 +258,8 @@ class ContainerController(Controller):
             container_info = self.container_info(self.account_name,
                                                  self.container_name, req)
         if container_info and is_container_sharded(container_info) and \
-             not req.environ.get('swift.req_info') and \
-             not req.environ.get('swift.skip_sharded'):
+                not req.environ.get('swift.req_info') and \
+                not req.environ.get('swift.skip_sharded'):
             # GETorHEAD_sharded still calls GETorHEAD_base, but seeing as
             # it is sharded there will probably be more then 1 container,
             # therefore needs to send more requests and find more then 1
@@ -445,7 +442,7 @@ class ContainerController(Controller):
                                              self.container_name)
         if is_container_sharded(container_info):
             trie, _resp = self.get_shard_trie(req, self.account_name,
-                                               self.container_name)
+                                              self.container_name)
             resp = self._delete_shards(trie, req, root=True)
             if not resp.is_success():
                 return resp

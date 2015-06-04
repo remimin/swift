@@ -59,7 +59,6 @@ from swift.common.http import (
     HTTP_MULTIPLE_CHOICES, HTTP_NOT_FOUND, HTTP_INTERNAL_SERVER_ERROR,
     HTTP_SERVICE_UNAVAILABLE, HTTP_INSUFFICIENT_STORAGE,
     HTTP_PRECONDITION_FAILED, HTTP_CONFLICT, is_informational)
-from swift.common.shardtrie import to_shard_trie
 from swift.common.storage_policy import (POLICIES, REPL_POLICY, EC_POLICY,
                                          ECDriverError, PolicyError)
 from swift.proxy.controllers.base import Controller, delay_denial, \
@@ -232,19 +231,16 @@ class BaseObjectController(Controller):
         :param container_info: The container info of the current container.
         :return: a tuple (prefix, container_info)
         """
+        # We should always be dealing with the root trie, which now
+        # shortcuts, by having a copy of all the distributed nodes. So
+        # instead of having to iterate through the whole distributed trie. We
+        # can short cut to return the closest distributed node or it's this
+        # container
         try:
             _node = trie.get_node(self.object_name)
             return trie.root_key
         except shardtrie.ShardTrieDistributedBranchException as ex:
-            acct, cont = get_container_shard_path(self.account_name,
-                                                  self.container_name,
-                                                  ex.key)
-            new_trie, _resp = self.get_shard_trie(req, acct, cont)
-            if new_trie.is_empty():
-                # its a subtrie will no distributed
-                new_trie._root._key = ex.key
-            new_trie.trim_trunk()
-            return self._get_shard_node(req, new_trie)
+            return ex.key
 
     def _find_shard_path(self, req):
 
@@ -970,7 +966,6 @@ class BaseObjectController(Controller):
 
         # pass the policy index to storage nodes via req header
         req.headers['X-Backend-Storage-Policy-Index'] = policy_index
-
 
         # is request authorized
         if 'swift.authorize' in req.environ:
