@@ -191,7 +191,8 @@ class Node():
     def get_node(self, key):
         key_len = len(key)
         full_key_len = self.level - 1
-        next_key = key[full_key_len]
+        if full_key_len < key_len:
+            next_key = key[full_key_len]
 
         if full_key_len == key_len and self.key[-1] == key[-1]:
             fullkey = self.full_key()

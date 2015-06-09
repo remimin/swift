@@ -456,7 +456,7 @@ class ContainerSharder(ContainerReplicator):
                 continue
             root_account, root_container = \
                 ContainerSharder.get_shard_root_path(broker)
-            prefix = broker.metadata.get('X-Container-Sysmeta-Shard-Prefix') \
+            prefix = broker.metadata.get('X-Container-Sysmeta-Shard-Prefix')[0]\
                 or ''
 
             is_root = root_container == broker.container
@@ -524,8 +524,8 @@ class ContainerSharder(ContainerReplicator):
             #       ditributed path
             if counting_trie.candidates:
                 candidate = counting_trie.candidates[0]
-                trie = broker.build_shard_trie(broker.storage_policy_index,
-                                               prefix=candidate)
+                trie, _misplaced = broker.build_shard_trie(
+                    broker.storage_policy_index, prefix=candidate)
 
                 node = trie[candidate]
                 if node.flag == DISTRIBUTED_BRANCH:
