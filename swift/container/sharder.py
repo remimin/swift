@@ -456,9 +456,9 @@ class ContainerSharder(ContainerReplicator):
                 continue
             root_account, root_container = \
                 ContainerSharder.get_shard_root_path(broker)
-            prefix = broker.metadata.get('X-Container-Sysmeta-Shard-Prefix')[0]\
-                or ''
-
+            prefix = broker.metadata.get('X-Container-Sysmeta-Shard-Prefix')
+            prefix = '' if prefix is None else prefix[0]
+            
             is_root = root_container == broker.container
 
             # Load everything into the count trie, starting with
