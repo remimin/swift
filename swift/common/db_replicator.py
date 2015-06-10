@@ -321,7 +321,7 @@ class Replicator(Daemon):
         # the shard nodes stored in a container database. The number of these
         # should always been _much_ less then normal objects, however for
         # completeness we should probably have a limit and pointer here too.
-        other_items = self._other_items_hook()
+        other_items = self._other_items_hook(broker)
         if other_items:
             with Timeout(self.node_timeout):
                 response = http.replicate('merge_items', other_items, local_id)
