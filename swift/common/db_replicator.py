@@ -756,7 +756,7 @@ class ReplicatorRpc(object):
             sleep()
         # Note the following hook will need to change to using a pointer and
         # limit in the future.
-        other_items = self._other_items_hook()
+        other_items = self._other_items_hook(new_broker)
         if other_items:
             new_broker.merge_items(other_items)
         new_broker.newid(args[0])
