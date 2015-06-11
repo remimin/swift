@@ -234,6 +234,7 @@ class ContainerSharder(ContainerReplicator):
         :param timestamp: set the objects timestamp to the provided one.
                This is used specifically when deleting objects that have been
                sharded away.
+        :param filter_dist: filter out distributed nodes from the list.
 
         :return: A list of item dictionaries ready to be consumed by
                  merge_items.
@@ -596,7 +597,8 @@ class ContainerSharder(ContainerReplicator):
                 items = self._generate_object_list(split_trie,
                                                    broker.storage_policy_index,
                                                    delete=True,
-                                                   timestamp=timestamp)
+                                                   timestamp=timestamp,
+                                                   filter_dist=is_root)
                 # Make sure the new distributed node has been added.
                 dist_node = trie[node.full_key()]
                 dist_node_item = self._generate_object_list(
@@ -611,7 +613,7 @@ class ContainerSharder(ContainerReplicator):
                         CONTAINER_LISTING_LIMIT:
                     marker = trie.get_last_node()
                     add_other_nodes(marker, broker, True, timestamp=timestamp,
-                                    filter_dist=True)
+                                    filter_dist=is_root)
 
                 if not is_root:
                     # Push the new distributed node to the root container,
