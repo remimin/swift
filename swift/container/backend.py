@@ -412,6 +412,11 @@ class ContainerBroker(DatabaseBroker):
         info = self.get_info()
         return info, self._is_deleted_info(**info)
 
+    def get_replication_info(self):
+        info = super(ContainerBroker, self).get_replication_info()
+        info['shard_max_row'] = self.get_max_row('shard_nodes')
+        return info
+
     def get_info(self):
         """
         Get global data for the container.

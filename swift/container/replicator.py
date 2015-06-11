@@ -245,6 +245,12 @@ class ContainerReplicator(db_replicator.Replicator):
             self.replicate_reconcilers()
         return rv
 
+    def _in_sync(self, rinfo, info, broker, local_sync):
+        if rinfo['shard_max_row'] < info['shard_max_row']:
+            return False
+        return super(ContainerReplicator, self)._in_sync(rinfo, info, broker,
+                                                         local_sync)
+
     def _other_items_hook(self, broker):
         return other_items_hook(broker)
 

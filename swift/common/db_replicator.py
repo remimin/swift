@@ -308,6 +308,28 @@ class Replicator(Daemon):
             self.stats['diff_capped'] += 1
             self.logger.increment('diff_caps')
         else:
+            # Attempt to sync other items
+            # Note the following will have to be cleaned up at some point. The
+            # hook here is to grab other items (non-objects) to replicate,
+            # namely the shard nodes stored in a container database. The number
+            # of these should always been _much_ less then normal objects,
+            # however for completeness we should probably have a limit and
+            # pointer here too.
+            other_items = self._other_items_hook(broker)
+            if other_items:
+                with Timeout(self.node_timeout):
+                    response = http.replicate('merge_items', other_items,
+                                              local_id)
+                if not response or response.status >= 300 \
+                        or response.status < 200:
+                    if response:
+                        self.logger.error(_('ERROR Bad response %(status)s '
+                                            'from %(host)s'),
+                                          {'status': response.status,
+                                           'host': http.host})
+                    return False
+
+            # Now merge_syncs
             with Timeout(self.node_timeout):
                 response = http.replicate('merge_syncs', sync_table)
             if response and response.status >= 200 and response.status < 300:
@@ -315,23 +337,6 @@ class Replicator(Daemon):
                                      'sync_point': point}],
                                    incoming=False)
                 return True
-
-        # Note the following will have to be cleaned up at some point. The
-        # hook here is to grab other items (non-objects) to replicate, namely
-        # the shard nodes stored in a container database. The number of these
-        # should always been _much_ less then normal objects, however for
-        # completeness we should probably have a limit and pointer here too.
-        other_items = self._other_items_hook(broker)
-        if other_items:
-            with Timeout(self.node_timeout):
-                response = http.replicate('merge_items', other_items, local_id)
-            if not response or response.status >= 300 or response.status < 200:
-                if response:
-                    self.logger.error(_('ERROR Bad response %(status)s from '
-                                        '%(host)s'),
-                                      {'status': response.status,
-                                       'host': http.host})
-                return False
 
         return False
 
