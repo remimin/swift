@@ -889,7 +889,7 @@ class ContainerBroker(DatabaseBroker):
                 _merge_items_by_type(curs, 'object')
             if trie_node_list:
                 _merge_items_by_type(curs, 'shard_nodes')
-            if source:
+            if source and item_list:
                 # for replication we rely on the remote end sending merges in
                 # order with no gaps to increment sync_points
                 sync_point = item_list[-1]['ROWID']
