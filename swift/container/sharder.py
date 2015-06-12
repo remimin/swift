@@ -161,7 +161,7 @@ class ContainerSharder(ContainerReplicator):
         return results
 
     def _get_shard_trie(self, account, container):
-        path = self.swift.make_path(acct, cont) + \
+        path = self.swift.make_path(account, container) + \
             '?format=trie&trie_nodes=distributed'
         headers = {'X-Skip-Sharding': 'On'}
         resp = self.swift.make_request('GET', path, headers,
