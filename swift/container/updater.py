@@ -206,6 +206,21 @@ class ContainerUpdater(Daemon):
                     self.process_container(os.path.join(root, file))
                     time.sleep(self.slowdown)
 
+    def get_account_and_container(self, broker):
+        account = broker.metadata.get('X-Container-Sysmeta-Shard-Account')
+        if account:
+            account = account[0]
+        else:
+            account = broker.account
+
+        container = broker.metadata.get('X-Container-Sysmeta-Shard-Container')
+        if container:
+            container = container[0]
+        else:
+            container = broker.container
+
+        return account, container
+
     def process_container(self, dbfile):
         """
         Process a container, and update the information in the account.
@@ -225,7 +240,7 @@ class ContainerUpdater(Daemon):
                 info['delete_timestamp'] > info['reported_delete_timestamp'] \
                 or info['object_count'] != info['reported_object_count'] or \
                 info['bytes_used'] != info['reported_bytes_used']:
-            container = '/%s/%s' % (info['account'], info['container'])
+            container = '/%s/%s' % (self.get_account_and_container(broker))
             part, nodes = self.get_account_ring().get_nodes(info['account'])
             events = [spawn(self.container_report, node, part, container,
                             info['put_timestamp'], info['delete_timestamp'],
