@@ -126,11 +126,13 @@ class ContainerController(Controller):
             breakout = False
             for node in getattr(shard_trie, iterator_func)():
                 if node.is_distributed():
-                    if node.key in dist_nodes:
+                    full_key = node.full_key()
+                    if full_key in dist_nodes:
                         # Now that we grab CONTAINER_LISTING_LIMIT objects
                         # at a time, we may hit the same dist node more then
                         # once.
                         continue
+                    dist_nodes.append(full_key)
                     new_trie = _get_trie(node, marker=marker,
                                          end_marker=end_marker, limit=limit)
                     tmp_obs, limit, breakout = _get_nodes_from_trie(
