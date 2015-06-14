@@ -240,8 +240,9 @@ class ContainerUpdater(Daemon):
                 info['delete_timestamp'] > info['reported_delete_timestamp'] \
                 or info['object_count'] != info['reported_object_count'] or \
                 info['bytes_used'] != info['reported_bytes_used']:
-            container = '/%s/%s' % (self.get_account_and_container(broker))
-            part, nodes = self.get_account_ring().get_nodes(info['account'])
+            account, container = self.get_account_and_container(broker)
+            container = '/%s/%s' % (account, container)
+            part, nodes = self.get_account_ring().get_nodes(account)
             events = [spawn(self.container_report, node, part, container,
                             info['put_timestamp'], info['delete_timestamp'],
                             info['object_count'], info['bytes_used'],
@@ -266,7 +267,7 @@ class ContainerUpdater(Daemon):
                 self.logger.debug(
                     _('Update report failed for %(container)s %(dbfile)s'),
                     {'container': container, 'dbfile': dbfile})
-                self.account_suppressions[info['account']] = until = \
+                self.account_suppressions[account] = until = \
                     time.time() + self.account_suppression_time
                 if self.new_account_suppressions:
                     print >>self.new_account_suppressions, \
