@@ -46,7 +46,7 @@ class ShardTrieException(Exception):
     pass
 
 
-class Node():
+class Node(object):
     def __init__(self, key, parent=None, level=1):
         self._key = key
         self._data = None
