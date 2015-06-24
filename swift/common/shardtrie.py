@@ -535,9 +535,9 @@ class CountingNode():
         node_key = self.full_key()
         if key == node_key:
             if distributed:
-                self.distributed = True
-                return 0
-            return 1
+                self._distributed = True
+                return 0, None
+            return 1, None
         elif self._distributed:
             self._trie.misplaced.append((key, self.full_key, data))
             return 0, self.full_key
@@ -554,7 +554,7 @@ class CountingNode():
                 self._children[c].remove(recursive=True)
 
             res = self._children[next_key].add(key, distributed)
-            self._count += res
+            self._count += res[0]
             if self._key != self._trie.root_key:
                 if self._count == self._trie.max_group_size:
                     self._trie.new_candidate(self._level, self.full_key())
