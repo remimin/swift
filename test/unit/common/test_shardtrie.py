@@ -284,6 +284,11 @@ class TestCountingTrie(unittest.TestCase):
 
         self.assertEqual(trie.get_best_candidates(), (2, ['ab']))
 
+        # Check the case were the trie finds more than one candidate
+        keys = ['a', 'abc', 'abd', 'cba', 'cbb']
+        trie = self._setup_trie(keys=keys, group_count=2)
+        self.assertEqual(trie.get_best_candidates(), (2, ['ab', 'cb']))
+
     def test_countingtrie_new_candidate(self):
         """Test manually adding a best candidate"""
         trie = self._setup_trie()
