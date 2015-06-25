@@ -181,11 +181,11 @@ class TestShardTrie(unittest.TestCase):
 
         # Iterate over all data nodes
         self.assertTrue(
-            all([x.data != None for x in trie.get_important_nodes()]))
+            all([x.data is not None for x in trie.get_important_nodes()]))
 
         # Iterate over only 2 data nodes
         self.assertEqual(
-            len(list(trie.get_important_nodes(limit = 2))),
+            len(list(trie.get_important_nodes(limit=2))),
             2)
 
         # Iterate starting after node abc
@@ -254,6 +254,7 @@ class TestShardTrie(unittest.TestCase):
         subtrie.add('abef', flag=shardtrie.EMPTY)
         subtrie.add('abefg', 'test data')
         subtrie.trim_trunk()
+
 
 class TestCountingTrie(unittest.TestCase):
     """Tests for swift.common.CountingTrie"""
