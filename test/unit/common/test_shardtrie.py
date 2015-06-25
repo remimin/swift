@@ -199,6 +199,12 @@ class TestShardTrie(unittest.TestCase):
             list(trie.get_important_nodes('abc'))[0].full_key(),
             'abc')
 
+        # Iterate over a distributed and data node
+        subtrie = trie.split_trie('ab')
+        self.assertEqual(
+            len(list(trie.get_important_nodes())),
+            2)
+
     def test_shardtrie_dump(self):
         """Test adding a node to a distributed shardtrie"""
         trie = self.trie
@@ -309,4 +315,3 @@ class TestCountingTrie(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-   "ti±
