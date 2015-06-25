@@ -46,7 +46,7 @@ class ShardTrieException(Exception):
     pass
 
 
-class Node():
+class Node(object):
     def __init__(self, key, parent=None, level=1):
         self._key = key
         self._data = None
@@ -271,7 +271,7 @@ class Node():
         return node_dict
 
 
-class ShardTrie():
+class ShardTrie(object):
     """A distributed prefix tree used for managing container shards
 
     Nodes have a timestamp which is used for merging trees.
@@ -495,7 +495,7 @@ class ShardTrie():
         return results
 
 
-class CountingNode():
+class CountingNode(object):
     def __init__(self, key, parent, level, trie=None):
         self._key = key
         self._parent = parent
@@ -561,7 +561,7 @@ class CountingNode():
             return res
 
 
-class CountingTrie():
+class CountingTrie(object):
     """Counting prefix tree (trie)
 
     This trie is a prefix trie, but is solely used to find the best candidate
