@@ -417,7 +417,7 @@ class ShardTrie(object):
         node = self.get_node(key)
         if node:
             if node.is_distributed() or force:
-                new_key = subtrie.root[-1]
+                new_key = subtrie.root_key[-1]
                 node.parent.children[new_key] = subtrie.root
                 subtrie.root.key = new_key
                 subtrie.root.parent = node.parent
