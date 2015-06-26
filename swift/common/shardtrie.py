@@ -230,9 +230,10 @@ class Node(object):
             return self.data if full else self.data['data']
 
     def delete(self, key):
-        full_key = self.full_key()
-        key_len = len(full_key)
-        if full_key == key:
+        trie_depth = self.level - 1
+        # Python short circuits comparisons. Thus the full key is only looked
+        #  up when likely at the node to delete
+        if trie_depth == len(key) and key == self.full_key():
             if self.children:
                 self.timestamp = Timestamp(time.time()).internal
                 self.data = None
@@ -246,8 +247,8 @@ class Node(object):
                 self.children = None
                 self._parent = None
             return True
-        elif key_len < len(key):
-            next_key = key[:key_len]
+        elif trie_depth < len(key):
+            next_key = key[trie_depth]
             if next_key not in self.children:
                 return False
 
