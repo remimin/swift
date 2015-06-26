@@ -230,8 +230,9 @@ class Node(object):
             return self.data if full else self.data['data']
 
     def delete(self, key):
-        key_len = len(self.key)
-        if self.key == key:
+        full_key = self.full_key()
+        key_len = len(full_key)
+        if full_key == key:
             if self.children:
                 self.timestamp = Timestamp(time.time()).internal
                 self.data = None
@@ -246,7 +247,7 @@ class Node(object):
                 self._parent = None
             return True
         elif key_len < len(key):
-            next_key = key[:key_len + 1]
+            next_key = key[:key_len]
             if next_key not in self.children:
                 return False
 
