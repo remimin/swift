@@ -159,6 +159,11 @@ class TestShardTrie(unittest.TestCase):
         self.assertTrue(trie.delete('abc'))
         self.assertEqual(trie.root.count_data_nodes(), number_data_nodes - 1)
 
+        # Delete a node on a distributed branch
+        subtrie = trie.split_trie('ab')
+        self.assertFalse(trie.delete('abd'))
+        self.assertTrue(subtrie.delete('abd'))
+
     def test_shardtrie_add(self):
         """Test adding a node to the shardtrie"""
         trie = self.trie
