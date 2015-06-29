@@ -230,8 +230,10 @@ class Node(object):
             return self.data if full else self.data['data']
 
     def delete(self, key):
-        key_len = len(self.key)
-        if self.key == key:
+        trie_depth = self.level - 1
+        # Python short circuits comparisons. Thus the full key is only looked
+        #  up when likely at the node to delete
+        if trie_depth == len(key) and key == self.full_key():
             if self.children:
                 self.timestamp = Timestamp(time.time()).internal
                 self.data = None
@@ -245,8 +247,8 @@ class Node(object):
                 self.children = None
                 self._parent = None
             return True
-        elif key_len < len(key):
-            next_key = key[:key_len + 1]
+        elif trie_depth < len(key):
+            next_key = key[trie_depth]
             if next_key not in self.children:
                 return False
 
@@ -416,7 +418,7 @@ class ShardTrie(object):
         node = self.get_node(key)
         if node:
             if node.is_distributed() or force:
-                new_key = subtrie.root[-1]
+                new_key = subtrie.root_key[-1]
                 node.parent.children[new_key] = subtrie.root
                 subtrie.root.key = new_key
                 subtrie.root.parent = node.parent
@@ -535,9 +537,9 @@ class CountingNode(object):
         node_key = self.full_key()
         if key == node_key:
             if distributed:
-                self.distributed = True
-                return 0
-            return 1
+                self._distributed = True
+                return 0, None
+            return 1, None
         elif self._distributed:
             self._trie.misplaced.append((key, self.full_key, data))
             return 0, self.full_key
@@ -554,7 +556,7 @@ class CountingNode(object):
                 self._children[c].remove(recursive=True)
 
             res = self._children[next_key].add(key, distributed)
-            self._count += res
+            self._count += res[0]
             if self._key != self._trie.root_key:
                 if self._count == self._trie.max_group_size:
                     self._trie.new_candidate(self._level, self.full_key())
