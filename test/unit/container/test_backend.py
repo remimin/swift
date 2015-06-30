@@ -1456,6 +1456,101 @@ class TestContainerBroker(unittest.TestCase):
         }
         self.assertEqual(broker.get_policy_stats(), expected)
 
+    def test_build_shard_trie(self):
+        """Test building a shardtrie from the table"""
+        broker = ContainerBroker(':memory:', account='a', container='c')
+        broker.initialize(Timestamp('1').internal, 0)
+        broker.put_object('o', Timestamp('2').internal, 0, 'text/plain',
+                          'd41d8cd98f00b204e9800998ecf8427e')
+        sleep(0.00001)
+
+        # Sanity check, simple case of two non-distributed nodes
+        trie, errors = broker.build_shard_trie()
+        self.assertTrue(trie is not None)
+
+        counter = itertools.count(3)
+
+        def distributed_nodes(*names):
+            def yield_distributed_nodes(_):
+                for name in names:
+                    yield (name,
+                           Timestamp(str(counter.next())).internal,
+                           shardtrie.DISTRIBUTED_BRANCH)
+            return yield_distributed_nodes
+
+        mock_path = 'swift.container.backend.ContainerBroker.get_shard_nodes'
+        # try building with different distibuted node
+        with mock.patch(mock_path, distributed_nodes('ob', 'ab')):
+            trie, errors = broker.build_shard_trie(marker='o')
+            self.assertEqual(errors, [])
+            self.assertTrue(trie.get_node('ob'))
+
+        # try building with a broken tree
+        with mock.patch(mock_path, distributed_nodes('ob', 'obj')):
+            trie, errors = broker.build_shard_trie(marker='obj')
+            self.assertEqual(errors[0][0][0], 'obj')
+            self.assertRaises(shardtrie.ShardTrieDistributedBranchException,
+                              trie.get_node, 'obj')
+
+        # try adding nodes without a marker specified and w/ broken tree
+        with mock.patch(mock_path, distributed_nodes('ob', 'obj', 'oc')):
+            trie, errors = broker.build_shard_trie()
+            self.assertEqual(len(errors), 1)
+            self.assertTrue(trie.get_node('ob'))
+
+        # force adding a non-distributed node to fail
+        mock_path = 'swift.common.shardtrie.ShardTrie.add'
+
+        def kaboom(*args, **kwargs):
+            raise shardtrie.ShardTrieDistributedBranchException(
+                'kaboom', None, None)
+        with mock.patch(mock_path, kaboom):
+            trie, errors = broker.build_shard_trie()
+            self.assertNotEqual(errors, [])
+
+    def test_all_shard_nodes_since(self):
+        broker = ContainerBroker(':memory:', account='a', container='c')
+        broker.initialize(Timestamp('1').internal, 0)
+
+        counter = itertools.count(1)
+
+        def node(name, flag=shardtrie.DISTRIBUTED_BRANCH):
+            return (name, Timestamp(str(counter.next())).internal, flag)
+        nodes = broker.shard_nodes_to_items([
+            node('a'),
+            node('b'),
+            node('c'),
+            node('d'),
+            node('e', shardtrie.DATA_PRESENT),
+            node('ef')
+        ])
+
+        broker.merge_items(nodes)
+
+        nodes_since_3 = sorted(
+            [x['name'] for x in broker.get_all_shard_nodes_since(
+                Timestamp('3').internal)])
+        self.assertEqual(['c', 'd', 'e', 'ef'], nodes_since_3)
+
+        def get_tables():
+            with broker.get() as conn:
+                return [
+                    x['name'] for x in conn.execute(
+                        'SELECT name '
+                        'FROM sqlite_master '
+                        'WHERE type="table";').fetchall()]
+
+        with broker.get() as conn:
+            conn.execute('DROP TABLE shard_nodes;')
+        self.assertNotIn('shard_nodes', get_tables())
+
+        path = 'swift.common.db.get_db_connection'
+        error = sqlite3.OperationalError('no such table: shard_nodes')
+        with mock.patch(path, mock.Mock(side_effect=error)):
+            broker.get_all_shard_nodes_since()
+
+        self.assertIn('shard_nodes', get_tables())
+
 
 class TestCommonContainerBroker(TestExampleBroker):
 
