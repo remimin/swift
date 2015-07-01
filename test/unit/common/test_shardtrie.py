@@ -270,10 +270,15 @@ class TestCountingTrie(unittest.TestCase):
     def tearDown(self):
         pass
 
-    def _setup_trie(self, keys=['a', 'abc', 'abd'], group_count=500):
-        trie = shardtrie.CountingTrie(max_group_size=group_count)
+    def _setup_trie(self, keys=['', 'a', 'abc', 'abd'], group_count=500):
+        """Setup a counting trie for testing
 
-        for node in keys:
+        keys[0] will be the root of the trie
+        keys[1:] are then added to the trie
+        """
+        trie = shardtrie.CountingTrie(keys[0], max_group_size=group_count)
+
+        for node in keys[1:]:
             trie.add(node)
 
         return trie
@@ -291,7 +296,7 @@ class TestCountingTrie(unittest.TestCase):
         self.assertEqual(trie.get_best_candidates(), (2, ['ab']))
 
         # Check the case were the trie finds more than one candidate
-        keys = ['a', 'abc', 'abd', 'cba', 'cbb']
+        keys = ['', 'a', 'abc', 'abd', 'cba', 'cbb']
         trie = self._setup_trie(keys=keys, group_count=2)
         self.assertEqual(trie.get_best_candidates(), (2, ['ab', 'cb']))
 
@@ -302,18 +307,22 @@ class TestCountingTrie(unittest.TestCase):
         trie.new_candidate(9, 'abcdefghi')
         self.assertEqual(trie.get_best_candidates(), (9, ['abcdefghi']))
 
-    def test_countingtrie_misplaced_node(self):
+    def test_countingtrie_misplaced_nodes(self):
         """Test that counting trie correctly notices misplaced nodes"""
         trie = self._setup_trie()
 
-        # Note: a misplaced node is one that is inserted into a trie but
-        # must be placed on a distributed node
+        # a misplaced node is one that is inserted after a distributed node
         trie.add('abcd', True)
         trie.add('abcde')
         self.assertEqual(len(trie.misplaced), 1)
 
         trie.clear_misplaced()
         self.assertEqual(len(trie.misplaced), 0)
+
+        # or a node that has a different root key (only when a subtrie)
+        trie = self._setup_trie(['abc', 'abcd', 'abce'])
+        trie.add('zzzzz')
+        self.assertEqual(len(trie.misplaced), 1)
 
     def test_countingtrie_remove(self):
         """Test that countingrie correctly prunes smaller subtries"""

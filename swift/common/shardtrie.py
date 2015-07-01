@@ -535,14 +535,20 @@ class CountingNode(object):
 
     def add(self, key, distributed=False, data=None):
         node_key = self.full_key()
+
+        # if we have reached the target node
         if key == node_key:
+            # if this node is a distributed subtrie, don't count it
             if distributed:
                 self._distributed = True
                 return 0, None
             return 1, None
-        elif self._distributed:
+        # if we are trying to add a node past a distributed node or this
+        #  node is not part of the same subtrie, it must be a mistake
+        elif self._distributed or not key.startswith(node_key):
             self._trie.misplaced.append((key, self.full_key, data))
             return 0, self.full_key
+        # create the next node in the chain if not there and try again
         if len(node_key) < len(key):
             next_key = key[len(node_key)]
             if next_key not in self._children:
