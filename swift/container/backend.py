@@ -1067,7 +1067,8 @@ class ContainerBroker(DatabaseBroker):
                 data = conn.execute('''
                     SELECT name, created_at, flag
                     FROM shard_nodes
-                    WHERE deleted=0;
+                    WHERE deleted=0
+                    ORDER BY name;
                     ''')
             except sqlite3.OperationalError as err:
                 if 'no such table: shard_nodes' in str(err):

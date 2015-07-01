@@ -271,7 +271,7 @@ class ContainerSharder(ContainerReplicator):
                     obj = {
                         'name': item[0],
                         'created_at': timestamp or item[1]}
-                    if len(obj) > 3:
+                    if len(item) > 3:
                         # object item
                         obj.update({
                             'size': item[2],
@@ -357,7 +357,7 @@ class ContainerSharder(ContainerReplicator):
         # [(key, self.full_key, data)]
         # for obj, _node in misplaced:
         for obj, dist_key, data in misplaced:
-            prefix = self._find_shard_container_prefix(trie, obj[0], account,
+            prefix = self._find_shard_container_prefix(trie, obj, account,
                                                        container, trie_cache)
             if shard_prefix_to_obj.get(prefix):
                 shard_prefix_to_obj[prefix].append(data)
@@ -367,11 +367,11 @@ class ContainerSharder(ContainerReplicator):
         self.logger.info(_('preparing to move misplaced objects found '
                            'in %s/%s'), account, container)
         for shard_prefix, obj_list in shard_prefix_to_obj.iteritems():
-            part, broker, node_id = self._get_and_fill_shard_broker(
+            part, new_broker, node_id = self._get_and_fill_shard_broker(
                 shard_prefix, obj_list, account, container, policy_index)
 
             self.cpool.spawn_n(
-                self._replicate_object, part, broker.db_file, node_id)
+                self._replicate_object, part, new_broker.db_file, node_id)
         self.cpool.waitall()
 
         # wipe out the cache do disable bypass in delete_db
@@ -385,7 +385,7 @@ class ContainerSharder(ContainerReplicator):
 
         # Remove the now relocated misplaced items.
         timestamp = Timestamp(time.time()).internal
-        objs = [obj for obj, node in misplaced]
+        objs = [data for obj, dist_key, data in misplaced]
         items = self._generate_object_list(objs, policy_index, delete=True,
                                            timestamp=timestamp)
         broker.merge_items(items)
@@ -468,26 +468,39 @@ class ContainerSharder(ContainerReplicator):
             counting_trie = CountingTrie(prefix, self.shard_group_count)
             self.logger.info(_('Starting scanning for best candidate subtree'
                                ' to for sharing'))
-            for dist_item in broker.get_shard_nodes():
-                counting_trie.add(dist_item[0], distributed=True,
-                                  data=dist_item)
+            if not is_root:
+                # Search for misplaced distributed items
+                for dist_item in broker.get_shard_nodes():
+                    counting_trie.add(dist_item[0], distributed=True,
+                                      data=dist_item)
 
-            if is_root and counting_trie.misplaced:
-                # Clear misplaced items, because if there are any at this
-                # point, its because root contains all dist_nodes, even
-                # dist_nodes beyond others.
-                counting_trie.clear_misplaced()
-
-            # Now that they are loaded, misplaced objects will be captured
-            # inside CountingTrie along with the best candidates.
-            # Now lets add the objects.
+            # Now we need to load the objects into the CountingTrie, special
+            # attention needs to be given with distributed nodes because we
+            # are also using the CountingTrie as a mechanism to find misplaced
+            # objects.
             marker = ''
             done = False
             obj_iter = broker.list_objects_iter(CONTAINER_LISTING_LIMIT,
                                                 marker, '', '', '')
+
+            dist_iter = iter(broker.get_shard_nodes())
+            try:
+                ditem = dist_iter.next()
+            except StopIteration:
+                ditem = None
+
             while not done:
                 count = 0
                 for item in obj_iter:
+                    while ditem and (item[0].startswith(ditem[0])
+                                     or item[0] > ditem[0]):
+                        if item[0].startswith(ditem[0]):
+                            counting_trie.add(ditem[0], True, ditem)
+                        try:
+                            ditem = dist_iter.next()
+                        except StopIteration:
+                            ditem = None
+
                     count += 1
                     marker = item[0]
                     counting_trie.add(item[0], data=item)
@@ -498,12 +511,6 @@ class ContainerSharder(ContainerReplicator):
                         CONTAINER_LISTING_LIMIT, marker, '', '', '')
             self.logger.info(_('Candidate subtree scan complete'))
 
-            #trie, misplaced = broker.build_full_shard_trie()
-            #is_root = True
-            #if root_container != broker.container:
-                # This node isn't the root node, so trim the trunk
-            #    trie.trim_trunk()
-            #    is_root = False
             if counting_trie.misplaced:
                 # There are objects that shouldn't be in this trie, that is to
                 # say, they live beyond a distributed node, so we need to move
