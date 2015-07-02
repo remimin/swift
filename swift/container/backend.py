@@ -1083,7 +1083,7 @@ class ContainerBroker(DatabaseBroker):
             try:
                 sql = 'SELECT name, created_at, flag, deleted '
                 sql += 'FROM shard_nodes '
-                sql += 'WHERE created_at >= %s ' % timestamp \
+                sql += 'WHERE created_at >= "%s" ' % timestamp \
                     if timestamp else ''
                 sql += 'ORDER BY ROWID ASC'
                 sql += 'LIMIT %d' % limit if limit else ''

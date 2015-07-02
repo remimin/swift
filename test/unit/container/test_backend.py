@@ -31,6 +31,7 @@ import json
 from swift.container.backend import ContainerBroker
 from swift.common.utils import Timestamp
 from swift.common.storage_policy import POLICIES
+from swift.common import shardtrie
 
 import mock
 
@@ -1455,6 +1456,28 @@ class TestContainerBroker(unittest.TestCase):
             1: {'object_count': 10, 'bytes_used': 20},
         }
         self.assertEqual(broker.get_policy_stats(), expected)
+
+    def test_all_shard_nodes_since(self):
+        broker = ContainerBroker(':memory:', account='a', container='c')
+        broker.initialize(Timestamp('1').internal, 0)
+
+        counter = itertools.count(1)
+        def node(name, flag=shardtrie.DISTRIBUTED_BRANCH):
+            return (name, Timestamp(str(counter.next())).internal, flag)
+        nodes = broker.shard_nodes_to_items([
+            node('a'),
+            node('b'),
+            node('c'),
+            node('d'),
+            node('e'),
+            node('ef')
+        ])
+
+        broker.merge_items(nodes)
+
+        nodes_since_3 = sorted([x['name'] for x in
+            broker.get_all_shard_nodes_since(Timestamp('3').internal)])
+        self.assertEqual(['c', 'd', 'e', 'ef'], nodes_since_3)
 
 
 class TestCommonContainerBroker(TestExampleBroker):
