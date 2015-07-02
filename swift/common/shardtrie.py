@@ -143,7 +143,7 @@ class Node(object):
         if isinstance(self.parent, Node):
             del self.parent.children[self.key]
         for child in sorted(self.children):
-            for c in child.popping_iter():
+            for c in self.children[child].popping_iter():
                 yield c
 
     def count_data_nodes(self):
