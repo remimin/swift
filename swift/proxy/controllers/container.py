@@ -254,7 +254,9 @@ class ContainerController(Controller):
                 if aresp:
                     return aresp
             return HTTPNotFound(request=req)
-
+        if 'x-skip-sharding' in req.headers:
+            req.environ['swift.skip_sharded'] = True
+            del req.headers['x-skip-sharding']
         container_info = None
         if not req.environ.get('swift.req_info'):
             container_info = self.container_info(self.account_name,

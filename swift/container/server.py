@@ -495,17 +495,15 @@ class ContainerController(BaseStorageServer):
         if out_content_type == 'application/trie':
             # dump to trie to the body so grab the trie
             is_root = False
-            if broker.metadata.get('X-Container-Sysmeta-Shard-Container'):
+            if not broker.metadata.get('X-Container-Sysmeta-Shard-Container'):
                 is_root = True
 
             try:
                 dist_error = not is_root
                 dist_only = req.params.get('trie_nodes', '') == 'distributed'
-                trie, _errors = broker.build_shard_trie(dist_only,
-                                                        marker=marker,
-                                                        end_marker=end_marker,
-                                                        limit=limit,
-                                                        dist_error=dist_error)
+                trie, _errors = broker.build_shard_trie(
+                    info['storage_policy_index'], dist_only, marker,
+                    end_marker, limit, dist_error)
             except Exception:
                 pass
             if not is_root:

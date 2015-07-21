@@ -14,8 +14,10 @@
 # limitations under the License.
 
 import errno
+import math
 import os
 import time
+import re
 from swift import gettext_ as _
 from random import random
 
@@ -96,6 +98,8 @@ class ContainerSharder(ContainerReplicator):
         self.devices = conf.get('devices', '/srv/node')
         self.mount_check = config_true_value(conf.get('mount_check', 'true'))
         self.interval = int(conf.get('interval', 1800))
+        self.per_diff = int(conf.get('per_diff', 1000))
+        self.max_diffs = int(conf.get('max_diffs') or 100)
         self.container_passes = 0
         self.container_failures = 0
         self.containers_running_time = 0
@@ -114,6 +118,8 @@ class ContainerSharder(ContainerReplicator):
                                               SHARD_GROUP_COUNT))
         self.node_timeout = int(conf.get('node_timeout', 10))
         self.reclaim_age = float(conf.get('reclaim_age', 86400 * 7))
+        self.extract_device_re = re.compile('%s%s([^%s]+)' % (
+            self.root, os.path.sep, os.path.sep))
 
         # internal client
         self.conn_timeout = float(conf.get('conn_timeout', 5))
@@ -140,6 +146,7 @@ class ContainerSharder(ContainerReplicator):
 
     def _zero_stats(self):
         """Zero out the stats."""
+        # TODO add actual sharding stats to track, and zero them out here.
         self.stats = {'attempted': 0, 'success': 0, 'failure': 0, 'ts_repl': 0,
                       'no_change': 0, 'hashmatch': 0, 'rsync': 0, 'diff': 0,
                       'remove': 0, 'empty': 0, 'remote_merge': 0,
@@ -160,10 +167,12 @@ class ContainerSharder(ContainerReplicator):
                 self._local_device_ids.add(node['id'])
         return results
 
-    def _get_shard_trie(self, account, container):
+    def _get_shard_trie(self, account, container, newest=False):
         path = self.swift.make_path(account, container) + \
             '?format=trie&trie_nodes=distributed'
         headers = {'X-Skip-Sharding': 'On'}
+        if newest:
+            headers['X-Newest'] = 'true'
         resp = self.swift.make_request('GET', path, headers,
                                        acceptable_statuses=(2,))
         return to_shard_trie(resp.body)
@@ -188,15 +197,13 @@ class ContainerSharder(ContainerReplicator):
             return self._find_shard_container_prefix(new_trie, key, account,
                                                      container, trie_cache)
 
-    def _get_shard_broker(self, prefix, account, container, policy_index):
+    def _get_shard_broker(self, account, container, policy_index):
         """
         Get a local instance of the shard container broker that will be
         pushed out.
 
-        :param prefix: the shard prefix to use
         :param account: the account
         :param container: the container
-
         :returns: a local shard container broker
         """
         if container in self.shard_brokers:
@@ -298,7 +305,8 @@ class ContainerSharder(ContainerReplicator):
         return objs
 
     def _get_and_fill_shard_broker(self, prefix, objs_or_trie, account,
-                                   container, policy_index, delete=False):
+                                   container, policy_index, delete=False,
+                                   timestamp=None):
         """
         Go grabs or creates a new container broker in a handoff partition
         to use as the new shard for the container. It then sets the required
@@ -316,7 +324,7 @@ class ContainerSharder(ContainerReplicator):
         """
         acct, cont = get_container_shard_path(account, container, prefix)
         try:
-            broker = self._get_shard_broker(prefix, acct, cont, policy_index)
+            broker = self._get_shard_broker(acct, cont, policy_index)
         except DeviceUnavailable as duex:
             self.logger.warning(_(str(duex)))
             return None
@@ -330,7 +338,7 @@ class ContainerSharder(ContainerReplicator):
                 'X-Container-Sysmeta-Shard-Prefix': (prefix, timestamp)})
 
         objects = self._generate_object_list(objs_or_trie, policy_index,
-                                             delete)
+                                             delete, timestamp=timestamp)
         broker.merge_items(objects)
 
         return self.shard_brokers[cont]
@@ -435,6 +443,108 @@ class ContainerSharder(ContainerReplicator):
             return
         return super(ContainerReplicator, self).delete_db(broker)
 
+    def _audit_shard_container(self, broker, prefix, root_account=None,
+                               root_container=None):
+        continue_with_container = True
+        if not root_account or not root_container:
+            root_account, root_container = \
+                ContainerSharder.get_shard_root_path(broker)
+
+        if root_container == broker.container:
+            # This is the root container, and therefore the tome of knowledge,
+            # So we must assume it's correct (though I may need to this about
+            # this some more).
+            return continue_with_container
+
+        root_ok = parent_ok = False
+        parent_prefix = None
+        # Get the root view of the world.
+        trie = self._get_shard_trie(root_account, root_container, newest=True)
+        try:
+            node = trie.get_node(prefix)
+            if node:
+                root_ok = True
+                # the node exists so now we need to find the parent (if there
+                # is one)
+                while node.parent is not None:
+                    node = node.parent
+                    if node.flag == DISTRIBUTED_BRANCH:
+                        parent_prefix = node.full_key()
+                        break
+                if node.key == trie.root_key:
+                    # Root is the parent.
+                    parent_ok = True
+            else:
+                # node not in root, even worse because no distributed branch
+                # exception was thrown, root should also be it's parent.
+                pass
+        except ShardTrieDistributedBranchException as ex:
+            # Container doesn't exist in root, but we do
+            # have the parent container's prefix now.
+            parent_prefix = ex.key
+
+        if parent_prefix:
+            # We need to check the parent trie.
+            acct, cont = get_container_shard_path(root_account, root_container,
+                                                  parent_prefix)
+            trie = self._get_shard_trie(acct, cont, newest=True)
+            try:
+                node = trie.get_node(prefix)
+                if node:
+                    parent_ok = True
+            except ShardTrieDistributedBranchException:
+                # If we get here, then we are in the strange position where
+                # the parent thinks the node exists in another sub trie,
+                # meaning the parent believes it is not the parent of our
+                # container. This means that it's been sharded but the root
+                # isn't up to date, we will mark as found for now as the
+                # sharder will find the new container and audit it fixing the
+                # root container if it failed, or we just happened to get a
+                # root container just before it was updated.
+                parent_ok = True
+
+        if parent_ok and root_ok:
+            # short circuit
+            return continue_with_container
+
+        if not parent_ok and not root_ok:
+            # We need to quarantine
+            self.logger.warning(_("Shard container '%s/%s' is being "
+                                  "quarantined, neither the root container "
+                                  "'%s/%s' or it's parent knows of it's "
+                                  "existance"), broker.account,
+                                broker.container, root_account, root_container)
+            # TODO quarantine the container
+            continue_with_container = False
+            return continue_with_container
+
+        trie = ShardTrie()
+        timestamp = Timestamp(time.time()).internal
+        trie.add(prefix, flag=DISTRIBUTED_BRANCH, timestamp=timestamp)
+        if not parent_ok:
+            # Update parent
+            if parent_prefix:
+                acct, cont = get_container_shard_path(root_account,
+                                                      root_container,
+                                                      parent_prefix)
+                self.logger.info(_("Shard container '%s/%s' is missing from "
+                                   "its parent container '%s/%s', "
+                                   "correcting."),
+                                 broker.account, broker.container, acct, cont)
+                self._push_dist_node_to_container(parent_prefix, root_account,
+                                                  root_container, trie,
+                                                  broker.storage_policy_index)
+        elif not root_ok:
+            # update root container
+            self.logger.info(_("Shard container '%s/%s' is missing from "
+                               "the root container '%s/%s', correcting."),
+                             broker.account, broker.container,
+                             root_account, root_container)
+            self._push_dist_node_to_container('', root_account, root_container,
+                                              trie,
+                                              broker.storage_policy_index)
+        return continue_with_container
+
     def _one_shard_pass(self, reported):
         self._zero_stats()
         local_devs = self._get_local_devices()
@@ -455,6 +565,14 @@ class ContainerSharder(ContainerReplicator):
             if not sharded:
                 # Not a shard container
                 continue
+            if broker.is_deleted():
+                # This container is deleted so we can skip it.
+                # TODO may need to think about what happens if the container
+                # is "deleted" but non-deleted items exist in the object table,
+                # if that's even possible (eventual consistancy may, need to
+                # look into what happens in container-replicator when one is
+                # deleted to be sure).
+                continue
             root_account, root_container = \
                 ContainerSharder.get_shard_root_path(broker)
             prefix = broker.metadata.get('X-Container-Sysmeta-Shard-Prefix')
@@ -462,9 +580,18 @@ class ContainerSharder(ContainerReplicator):
             
             is_root = root_container == broker.container
 
-            # Load everything into the count trie, starting with
-            # distributed nodes, as this will will also find us misplaced
-            # objects.
+            # Before we do any heavy lifting, lets do an audit on the shard
+            # container. We grab the root's view of the dist_nodes and make
+            # sure this container exists in it and in what should be it's
+            # parent. If its in both great, If it exists in either but not the
+            # other, then this needs to be fixed. If, however, it doesn't
+            # exist in either then this container may not exist anymore so
+            # quarantine it.
+            if not self._audit_shard_container(broker, prefix, root_account,
+                                               root_container):
+                continue
+
+            # Load everything into the count trie
             counting_trie = CountingTrie(prefix, self.shard_group_count)
             self.logger.info(_('Starting scanning for best candidate subtree'
                                ' to for sharing'))
@@ -482,7 +609,6 @@ class ContainerSharder(ContainerReplicator):
             done = False
             obj_iter = broker.list_objects_iter(CONTAINER_LISTING_LIMIT,
                                                 marker, '', '', '')
-
             dist_iter = iter(broker.get_shard_nodes())
             try:
                 ditem = dist_iter.next()
@@ -522,123 +648,22 @@ class ContainerSharder(ContainerReplicator):
                 self.shard_brokers = dict()
                 self.shard_cleanups = dict()
 
-            # TODO: In the next version we need to support shrinking
-            #       for this to work we need to be able to follow distributed
-            #       nodes, and therefore need to use direct or internal swift
-            #       client. For now we are just going to grow based of this
-            #       part of the shard trie.
-            # UPDATE: self.swift is an internal client, and
-            #       self._find_shard_container_prefix will follow the
-            #       ditributed path
             if counting_trie.candidates:
+                # There is a candidate subtrie for sharding, so we can split
+                # this container.
                 candidate = counting_trie.candidates[0]
-                trie, _misplaced = broker.build_shard_trie(
-                    broker.storage_policy_index, prefix=candidate)
+                self._split_container(broker, candidate)
+            else:
+                # There are no candidates, lets see if it's small enough to
+                # merge back into it's parent (shrink).
+                info = broker.get_info()
 
-                node = trie[candidate]
-                if node.flag == DISTRIBUTED_BRANCH:
-                    self.logger.warning(_('Best candidate for a shard trie '
-                                          'starts with a distributed node, '
-                                          'something is screwy'))
-                    continue
-                self.logger.info(_('sharding at container %s on prefix %s'),
-                                 broker.container, candidate)
-
-                marker = ''
-                if trie.metadata['data_node_count'] == \
-                        CONTAINER_LISTING_LIMIT:
-                    marker = trie.get_last_node()
-
-                split_trie = trie.split_trie(candidate)
-
-                try:
-                    part, new_broker, node_id = \
-                        self._get_and_fill_shard_broker(
-                            split_trie.root_key, split_trie, root_account,
-                            root_container, broker.storage_policy_index)
-                except DeviceUnavailable as duex:
-                    self.logger.warning(_(str(duex)))
-                    continue
-
-                # there might be more then CONTAINER_LISTING_LIMIT items in the
-                # new shard, if so add all the objects to the shard database.
-                def add_other_nodes(marker, broker_to_update, delete=False,
-                                    timestamp=None, filter_dist=False):
-                    while marker:
-                        tmp_trie = broker.build_shard_trie(
-                            broker.storage_policy_index, marker=marker,
-                            prefix=candidate)
-
-                        objects = self._generate_object_list(
-                            tmp_trie, broker.storage_policy_index, delete,
-                            timestamp, filter_dist)
-                        broker_to_update.merge_items(objects)
-                        if tmp_trie.metadata['data_node_count'] == \
-                                CONTAINER_LISTING_LIMIT:
-                            marker = tmp_trie.get_last_node()
-                        else:
-                            marker = ''
-
-                add_other_nodes(marker, new_broker)
-                # Make sure the account exists by running a container PUT
-                try:
-                    policy = POLICIES.get_by_index(broker.storage_policy_index)
-                    headers = {'X-Storage-Policy': policy.name}
-                    self.swift.create_container(new_broker.account,
-                                                new_broker.container,
-                                                headers=headers)
-                except internal_client.UnexpectedResponse as ex:
-                    self.logger.warning(_('Failed to put container: %s'),
-                                        str(ex))
-
-                self.logger.info(_('Replicating new shard container %s/%s'),
-                                 new_broker.account, new_broker.container)
-                self.cpool.spawn_n(
-                    self._replicate_object, part, new_broker.db_file, node_id)
-                self.cpool.waitall()
-
-                self.logger.info(_('Cleaning up sharded objects of old '
-                                   'container %s/%s'), broker.account,
-                                 broker.container)
-                timestamp = Timestamp(time.time()).internal
-                items = self._generate_object_list(split_trie,
-                                                   broker.storage_policy_index,
-                                                   delete=True,
-                                                   timestamp=timestamp,
-                                                   filter_dist=is_root)
-                # Make sure the new distributed node has been added.
-                dist_node = trie[node.full_key()]
-                dist_node_item = self._generate_object_list(
-                    ShardTrie(root_node=dist_node),
-                    broker.storage_policy_index, False)
-                items += dist_node_item
-                broker.merge_items(items)
-
-                # Again we might have to delete more then just the nodes found
-                # split trie.
-                if trie.metadata['data_node_count'] == \
-                        CONTAINER_LISTING_LIMIT:
-                    marker = trie.get_last_node()
-                    add_other_nodes(marker, broker, True, timestamp=timestamp,
-                                    filter_dist=is_root)
-
-                if not is_root:
-                    # Push the new distributed node to the root container,
-                    # we do this so we can short circuit PUTs.
-                    part, root_broker, node_id = \
-                        self._get_and_fill_shard_broker(
-                            '', dist_node_item, root_account, root_container,
-                            broker.storage_policy_index)
-                    self.cpool.spawn_n(
-                        self._replicate_object, part, root_broker.db_file,
-                        node_id)
-                    self.cpool.waitall()
-
-                self.logger.info(_('Finished sharding %s/%s, new shard '
-                                   'container %s/%s. Sharded at prefix %s.'),
-                                 broker.account, broker.container,
-                                 new_broker.account, new_broker.container,
-                                 split_trie.root_key)
+                # 10% of shard_group_count
+                shrink_max = math.ceil(self.shard_group_count * 0.1)
+                count = info.get('object_count')
+                if count and count in (None, '', 0, '0') or \
+                        int(count) < max(shrink_max, 10):
+                    self._shrink_trie(broker)
 
         # wipe out the cache do disable bypass in delete_db
         cleanups = self.shard_cleanups
@@ -675,6 +700,249 @@ class ContainerSharder(ContainerReplicator):
         #    self.containers_running_time = ratelimit_sleep(
         #        self.containers_running_time, self.max_containers_per_second)
         #return reported
+
+    def _split_container(self, broker, candidate):
+        root_account, root_container = \
+            ContainerSharder.get_shard_root_path(broker)
+        is_root = root_container == broker.container
+        dist_error = not is_root
+        trie, _misplaced = broker.build_shard_trie(
+            broker.storage_policy_index, prefix=candidate,
+            dist_error=dist_error)
+
+        node = trie[candidate]
+        if node.flag == DISTRIBUTED_BRANCH:
+            self.logger.warning(_('Best candidate for a shard trie '
+                                  'starts with a distributed node, '
+                                  'something is screwy'))
+            return
+        self.logger.info(_('sharding at container %s on prefix %s'),
+                         broker.container, candidate)
+
+        marker = ''
+        if trie.metadata['data_node_count'] == \
+                CONTAINER_LISTING_LIMIT:
+            marker = trie.get_last_node()
+
+        split_trie = trie.split_trie(candidate)
+
+        try:
+            part, new_broker, node_id = \
+                self._get_and_fill_shard_broker(
+                    split_trie.root_key, split_trie, root_account,
+                    root_container, broker.storage_policy_index)
+        except DeviceUnavailable as duex:
+            self.logger.warning(_(str(duex)))
+            return
+
+        # there might be more then CONTAINER_LISTING_LIMIT items in the
+        # new shard, if so add all the objects to the shard database.
+        def add_other_nodes(marker, broker_to_update, delete=False,
+                            timestamp=None, filter_dist=False):
+            while marker:
+                tmp_trie = broker.build_shard_trie(
+                    broker.storage_policy_index, marker=marker,
+                    prefix=candidate)
+
+                objects = self._generate_object_list(
+                    tmp_trie, broker.storage_policy_index, delete,
+                    timestamp, filter_dist)
+                broker_to_update.merge_items(objects)
+                if tmp_trie.metadata['data_node_count'] == \
+                        CONTAINER_LISTING_LIMIT:
+                    marker = tmp_trie.get_last_node()
+                else:
+                    marker = ''
+
+        add_other_nodes(marker, new_broker)
+        # Make sure the account exists by running a container PUT
+        try:
+            policy = POLICIES.get_by_index(broker.storage_policy_index)
+            headers = {'X-Storage-Policy': policy.name}
+            self.swift.create_container(new_broker.account,
+                                        new_broker.container,
+                                        headers=headers)
+        except internal_client.UnexpectedResponse as ex:
+            self.logger.warning(_('Failed to put container: %s'),
+                                str(ex))
+
+        self.logger.info(_('Replicating new shard container %s/%s'),
+                         new_broker.account, new_broker.container)
+        self.cpool.spawn_n(
+            self._replicate_object, part, new_broker.db_file, node_id)
+        self.cpool.waitall()
+
+        self.logger.info(_('Cleaning up sharded objects of old '
+                           'container %s/%s'), broker.account,
+                         broker.container)
+        timestamp = Timestamp(time.time()).internal
+        items = self._generate_object_list(split_trie,
+                                           broker.storage_policy_index,
+                                           delete=True,
+                                           timestamp=timestamp,
+                                           filter_dist=is_root)
+        # Make sure the new distributed node has been added.
+        dist_node = trie[node.full_key()]
+        dist_trie = ShardTrie(root_node=dist_node)
+        dist_node_item = self._generate_object_list(
+            dist_trie,
+            broker.storage_policy_index, False)
+        items += dist_node_item
+        broker.merge_items(items)
+
+        # Again we might have to delete more then just the nodes found
+        # split trie.
+        if trie.metadata['data_node_count'] == \
+                CONTAINER_LISTING_LIMIT:
+            marker = trie.get_last_node()
+            add_other_nodes(marker, broker, True, timestamp=timestamp,
+                            filter_dist=is_root)
+
+        if not is_root:
+            # Push the new distributed node to the root container,
+            # we do this so we can short circuit PUTs.
+            self._push_dist_node_to_container('', root_account, root_container,
+                                              dist_trie,
+                                              broker.storage_policy_index)
+
+        self.logger.info(_('Finished sharding %s/%s, new shard '
+                           'container %s/%s. Sharded at prefix %s.'),
+                         broker.account, broker.container,
+                         new_broker.account, new_broker.container,
+                         split_trie.root_key)
+
+    def _push_dist_node_to_container(self, prefix, root_account,
+                                     root_container, objs_or_trie,
+                                     storage_policy_index):
+        # Push the new distributed node to the container.
+        part, root_broker, node_id = \
+            self._get_and_fill_shard_broker(
+                prefix, objs_or_trie, root_account, root_container,
+                storage_policy_index)
+        self.cpool.spawn_n(
+            self._replicate_object, part, root_broker.db_file, node_id)
+        self.cpool.waitall()
+
+    def _shrink_trie(self, broker):
+        root_account, root_container = \
+                ContainerSharder.get_shard_root_path(broker)
+        if root_container == broker.container:
+            # Can't shrink the root container.
+            return
+
+        prefix = broker.metadata.get('X-Container-Sysmeta-Shard-Prefix')
+        prefix = '' if prefix is None else prefix[0]
+
+        # Find the parent node, start by getting the root container's trie
+        trie = self._get_shard_trie(root_account, root_container, newest=True)
+        parent_prefix = None
+        try:
+            node = trie.get_node(prefix)
+            if node:
+                # Parent node is the root container.
+                parent_prefix = ''
+        except ShardTrieDistributedBranchException as ex:
+            parent_prefix = ex.key
+
+        parent_acct, parent_cont = get_container_shard_path(root_account,
+                                                            root_container,
+                                                            parent_prefix)
+
+        self.logger.info(_("Merging sharded container '%s' into '%s'"),
+                         broker.container, parent_cont)
+
+        # lets make some timestamps, the delete timestamp needs to be earlier
+        # then timestamp of the moved files, in case the current container
+        # to revived and not actually deleted and any original files are moved
+        # back. Further, we need a new add timestamp because there is a chance
+        # that deleted objects still exist in the parent (if the objects
+        # existed before the container was split).
+        timestamp = Timestamp(time.time())
+        del_timestamp = timestamp.internal
+        timestamp = Timestamp(int(timestamp), 1)
+        add_timestamp = timestamp.internal
+        trie, _misplaced = broker.build_shard_trie(broker.storage_policy_index)
+        marker = ''
+        if trie.metadata['data_node_count'] == CONTAINER_LISTING_LIMIT:
+            marker = trie.get_last_node()
+
+        # Start loading the parent container, note we will be removing items
+        # from the current one at the same time, this way we are using a
+        # consistent view of the objects.
+        try:
+            part, parent_broker, node_id = \
+                self._get_and_fill_shard_broker(
+                    parent_prefix, trie, root_account, root_container,
+                    broker.storage_policy_index, timestamp=add_timestamp)
+        except DeviceUnavailable as duex:
+            self.logger.warning(_(str(duex)))
+            return
+
+        remove_items = self._generate_object_list(
+            trie, broker.storage_policy_index, delete=True,
+            timestamp=del_timestamp)
+        broker.merge_items(remove_items)
+
+        # there might be more then CONTAINER_LISTING_LIMIT items in the
+        # old shard container, which it shouldn't, but you never know what
+        # users will set the max_group_count too.
+        while marker:
+            trie = broker.build_shard_trie(
+                broker.storage_policy_index, marker=marker)
+
+            objects = self._generate_object_list(
+                trie, broker.storage_policy_index, delete=False,
+                timestamp=add_timestamp)
+            parent_broker.merge_items(objects)
+            remove_items = self._generate_object_list(
+                trie, broker.storage_policy_index, delete=True,
+                timestamp=del_timestamp)
+            broker.merge_items(remove_items)
+            if trie.metadata['data_node_count'] == \
+                    CONTAINER_LISTING_LIMIT:
+                marker = trie.get_last_node()
+            else:
+                marker = ''
+
+        # Make sure we remove the container from the parent (and root)
+        trie = ShardTrie()
+        timestamp = Timestamp(time.time()).internal
+        trie.add(prefix, flag=DISTRIBUTED_BRANCH, timestamp=timestamp)
+        dist_node_item = self._generate_object_list(
+            trie, broker.storage_policy_index, delete=True)
+
+        parent_broker.merge_items(dist_node_item)
+
+        # Root container also..
+        self.logger.info(_("Updating root container '%s'"), root_container)
+        self._push_dist_node_to_container('', root_account, root_container,
+                                          trie, broker.storage_policy_index)
+
+        # Now replicate the parent node, so the changes are pushed.
+        self.logger.info(_('Replicating parent container %s/%s'),
+                         parent_acct, parent_cont)
+        self.cpool.spawn_n(
+            self._replicate_object, part, parent_broker.db_file, node_id)
+        self.cpool.waitall()
+
+        self.logger.info(_('Cleaning up sharded objects of old '
+                           'container %s/%s'), broker.account,
+                         broker.container)
+
+        # Mark current container as deleted
+        broker.delete_db(timestamp)
+
+        # Now replicate the current container
+        self.logger.info(_('Replicating current container %s/%s'),
+                         broker.account, broker.container)
+        self.cpool.spawn_n(
+            self._replicate_object, part, broker.db_file, node_id)
+        self.cpool.waitall()
+
+        self.logger.info(_('Finished merging %s/%s, back into '
+                           'container %s/%s.'),
+                         broker.account, broker.container,
+                         parent_acct, parent_cont)
 
     def run_forever(self, *args, **kwargs):
         """Run the container sharder until stopped."""

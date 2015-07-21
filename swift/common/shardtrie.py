@@ -186,11 +186,13 @@ class Node(object):
                                 level=self.level + 1)
                 self.children[next_key] = new_node
 
-            return self.children[next_key].add(key, data, timestamp, flag)
+            return self.children[next_key].add(key, data, timestamp, flag,
+                                               force)
 
-    def get_node(self, key):
+    def get_node(self, key, exception=None):
         key_len = len(key)
         full_key_len = self.level - 1
+        next_key = None
         if full_key_len < key_len:
             next_key = key[full_key_len]
 
@@ -200,22 +202,29 @@ class Node(object):
                 raise ShardTrieException("Found key %s, but it doesn't match"
                                          " %s something weird is going on",
                                          key, fullkey)
+            if exception and self.flag != DISTRIBUTED_BRANCH:
+                raise exception
             return self
         elif self.flag == DISTRIBUTED_BRANCH:
+            exception = ShardTrieDistributedBranchException(
+                "Subtree '%s' has been distributed." % (self.full_key()),
+                self.full_key(), self)
+
             # We continue to check down the trie as the root node will
             # hold all the DISTRIBUTED_NODES as to allow us to short circuit
             # PUTs.
             if next_key in self._children:
-                return self.children[next_key].get_node(key)
+                return self.children[next_key].get_node(key, exception)
+            else:
+                raise exception
 
-            raise ShardTrieDistributedBranchException(
-                "Subtree '%s' has been distributed." % (self.full_key()),
-                self.full_key(), self)
         elif full_key_len < key_len:
             if next_key not in self.children:
+                if exception:
+                    raise exception
                 return None
 
-            return self.children[next_key].get_node(key)
+            return self.children[next_key].get_node(key, exception)
 
     def get_last_node(self):
         if not self._children:
@@ -227,12 +236,12 @@ class Node(object):
     def get(self, key, full=False):
         node = self.get_node(key)
         if node:
-            return self.data if full else self.data['data']
+            return self.data if not full else self
 
     def delete(self, key):
         trie_depth = self.level - 1
         # Python short circuits comparisons. Thus the full key is only looked
-        #  up when likely at the node to delete
+        # up when likely at the node to delete
         if trie_depth == len(key) and key == self.full_key():
             if self.children:
                 self.timestamp = Timestamp(time.time()).internal
