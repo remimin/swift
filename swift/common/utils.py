@@ -3660,3 +3660,118 @@ def get_md5_socket():
         raise IOError(ctypes.get_errno(), "Failed to accept MD5 socket")
 
     return md5_sockfd
+
+class PivotTrie(object):
+    def __init__(self, root=None):
+        if root:
+            if isinstance(root, PivotNode):
+                self._root = root
+            else:
+                self._root = PivotNode(root)
+        else:
+            self._root = None
+
+    def add(self, key, timestamp=None):
+        if not self._root:
+            self._root = PivotNode(key, timestamp)
+            return True
+        return self._root.add(key, timestamp)
+
+    def get(self, key):
+        if not self._root:
+            return None, None
+        return self._root.get(key)
+
+class PivotNode(object):
+    def __init__(self, key, timestamp=None, parent=None):
+        self._key = key
+        self._parent = parent
+        self._timestamp = timestamp if timestamp else \
+            Timestamp(time.time()).internal
+        self._pivot = None
+
+    @property
+    def key(self):
+        return self._key
+
+    @key.setter
+    def key(self, key):
+        self._key = key
+
+    @property
+    def parent(self):
+        return self._parent
+
+    @parent.setter
+    def parent(self, parent):
+        self._parent = parent
+
+    @property
+    def timestamp(self):
+        return self._timestamp
+
+    @timestamp.setter
+    def timestamp(self, timestamp):
+        self._timestamp = timestamp
+
+    @property
+    def pivot(self):
+        return self._pivot
+
+    @pivot.setter
+    def pivot(self, pivot):
+        self._pivot = pivot
+
+    def __iter__(self):
+        yield self
+        if self._pivot:
+            for c in self._pivot:
+                yield c
+
+    def leaves_iter(self):
+        if not self._pivot:
+            yield self
+        else:
+            self._pivot.leaves_iter()
+
+    def add(self, key, timestamp=None):
+        if not timestamp:
+            timestamp = Timestamp(time.time()).internal
+        if not self._pivot:
+            # This will be a new leaf node, so just add it.
+            self._pivot = PivotNode(key, timestamp, parent=self._key)
+            return True
+        if key in self._pivot.key:
+            # Key already exists
+            return False
+        return self._pivot.add(key, timestamp)
+
+    def _return_int(self, key):
+        if self._key == key:
+            return 0
+        elif self._key < key:
+            return 1
+        else:
+            return -1
+
+    def get(self, key):
+        """
+        Given the key, return the PivotNode (where the object (key) will be
+        stored) and an int representing where the key lies in relation to the
+        pivot point. Where the int is either:
+
+          -1: key is before the pivot point
+           0: key is equal to the pivot point
+           1: key is bigger then the pivot point
+
+        :rtype : Tuple of PivitNode and int (node, int) where the int's
+                 value represents the keys relation to the pivot point.
+        """
+        if self._pivot:
+            return self._pivot.get(key)
+        else:
+
+            return self, self._return_int(key)
+
+    def __getitem__(self, item):
+        return self.get(item)
