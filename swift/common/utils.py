@@ -3662,7 +3662,8 @@ def get_md5_socket():
     return md5_sockfd
 
 class PivotTrie(object):
-    def __init__(self, root=None):
+    def __init__(self, root=None, disable_timestamps=False):
+        self._disable_timestamps = disable_timestamps
         if root:
             if isinstance(root, PivotNode):
                 self._root = root
@@ -3672,6 +3673,11 @@ class PivotTrie(object):
             self._root = None
 
     def add(self, key, timestamp=None):
+        if self._disable_timestamps:
+            timestamp = None
+        elif not timestamp:
+            timestamp = Timestamp(time.time()).internal
+
         if not self._root:
             self._root = PivotNode(key, timestamp)
             return True
@@ -3745,19 +3751,27 @@ class PivotNode(object):
                     yield c
 
     def leaves_iter(self):
-        yielded_self = False
-        for node in (self._left, self._right):
+        """
+        A leaf iterator.
+
+        This method is an iterator which iterates through all the leaf nodes
+        of the trie. Because each node represents a pivot point, along with
+        the node it returns which side of the Pivot is the leaf.
+        The iterator returns a (node, weight) tuple. Where wieght indicates
+        which side of the node is a leaf, ie:
+
+          -1: The left side (< node.key)
+           1: The right side (> node.key)
+
+        """
+        for node, weight in ((self._left, -1), (self._right, 1)):
             if node:
-                for n in node.leaves_iter():
-                    yield n
+                for n, w in node.leaves_iter():
+                    yield n, w
             else:
-                if not yielded_self:
-                    yielded_self = True
-                    yield self
+                yield self, weight
 
     def add(self, key, timestamp=None):
-        if not timestamp:
-            timestamp = Timestamp(time.time()).internal
         if key < self.key:
             if self._left:
                 return self._left.add(key, timestamp)
