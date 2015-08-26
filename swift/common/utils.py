@@ -3685,6 +3685,10 @@ class PivotTrie(object):
     def __getitem__(self, item):
         return self.get(item)
 
+    def leaves_iter(self):
+        for leaf in self._root.leaves_iter():
+            yield leaf
+
 class PivotNode(object):
     def __init__(self, key, timestamp=None, parent=None):
         self._key = key
@@ -3735,15 +3739,21 @@ class PivotNode(object):
 
     def __iter__(self):
         yield self
-        if self._pivot:
-            for c in self._pivot:
-                yield c
+        for node in (self._left, self._right):
+            if node:
+                for c in node:
+                    yield c
 
     def leaves_iter(self):
-        if not self._pivot:
-            yield self
-        else:
-            self._pivot.leaves_iter()
+        yielded_self = False
+        for node in (self._left, self._right):
+            if node:
+                for n in node.leaves_iter():
+                    yield n
+            else:
+                if not yielded_self:
+                    yielded_self = True
+                    yield self
 
     def add(self, key, timestamp=None):
         if not timestamp:
