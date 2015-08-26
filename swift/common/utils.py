@@ -3682,13 +3682,16 @@ class PivotTrie(object):
             return None, None
         return self._root.get(key)
 
+    def __getitem__(self, item):
+        return self.get(item)
+
 class PivotNode(object):
     def __init__(self, key, timestamp=None, parent=None):
         self._key = key
         self._parent = parent
         self._timestamp = timestamp if timestamp else \
             Timestamp(time.time()).internal
-        self._pivot = None
+        self._left = self._right = None
 
     @property
     def key(self):
@@ -3715,12 +3718,20 @@ class PivotNode(object):
         self._timestamp = timestamp
 
     @property
-    def pivot(self):
-        return self._pivot
+    def left(self):
+        return self._left
 
-    @pivot.setter
-    def pivot(self, pivot):
-        self._pivot = pivot
+    @left.setter
+    def left(self, left):
+        self._left = left
+
+    @property
+    def right(self):
+        return self._right
+
+    @right.setter
+    def right(self, right):
+        self._right = right
 
     def __iter__(self):
         yield self
@@ -3737,14 +3748,21 @@ class PivotNode(object):
     def add(self, key, timestamp=None):
         if not timestamp:
             timestamp = Timestamp(time.time()).internal
-        if not self._pivot:
-            # This will be a new leaf node, so just add it.
-            self._pivot = PivotNode(key, timestamp, parent=self._key)
-            return True
-        if key in self._pivot.key:
+        if key < self.key:
+            if self._left:
+                return self._left.add(key, timestamp)
+            else:
+                self._left = PivotNode(key, timestamp, parent=self._key)
+                return True
+        elif key > self.key:
+            if self._right:
+                return self._right.add(key, timestamp)
+            else:
+                self._right = PivotNode(key, timestamp, parent=self._key)
+                return True
+        if key in (self._right.key, self._left.key):
             # Key already exists
             return False
-        return self._pivot.add(key, timestamp)
 
     def _return_int(self, key):
         if self._key == key:
@@ -3767,11 +3785,13 @@ class PivotNode(object):
         :rtype : Tuple of PivitNode and int (node, int) where the int's
                  value represents the keys relation to the pivot point.
         """
-        if self._pivot:
-            return self._pivot.get(key)
-        else:
-
-            return self, self._return_int(key)
+        if key <= self._key:
+            if self._left:
+                return self._left.get(key)
+        elif key > self._key:
+            if self._right:
+                return self._right.get(key)
+        return self, self._return_int(key)
 
     def __getitem__(self, item):
         return self.get(item)

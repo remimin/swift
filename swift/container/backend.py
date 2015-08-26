@@ -24,7 +24,7 @@ import six.moves.cPickle as pickle
 from six.moves import range
 import sqlite3
 
-from swift.common.utils import Timestamp
+from swift.common.utils import Timestamp, PivotTrie
 from swift.common.db import DatabaseBroker, utf8encode
 
 
@@ -246,7 +246,7 @@ class ContainerBroker(DatabaseBroker):
             VALUES (?)
         """, (storage_policy_index,))
 
-    def create_shard_nodes_table(self, conn):
+    def create_pivot_nodes_table(self, conn):
         """
         Create the shard_nodes table which is specific to the container DB.
 
@@ -254,12 +254,11 @@ class ContainerBroker(DatabaseBroker):
         """
         try:
             conn.executescript("""
-                CREATE TABLE shard_nodes (
+                CREATE TABLE pivot_nodes (
                     ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT,
                     created_at TEXT,
-                    deleted INTEGER DEFAULT 0,
-                    flag INTEGER
+                    deleted INTEGER DEFAULT 0
                 );
             """)
         except Exception:
@@ -926,42 +925,24 @@ class ContainerBroker(DatabaseBroker):
             CONTAINER_STAT_VIEW_SCRIPT +
             'COMMIT;')
 
-    def get_shard_nodes(self):
+    def get_pivot_nodes(self):
         data = []
         self._commit_puts_stale_ok()
         with self.get() as conn:
             try:
                 data = conn.execute('''
-                    SELECT name, created_at, flag
-                    FROM shard_nodes
+                    SELECT name, created_at
+                    FROM pivot_nodes
                     WHERE deleted=0
                     ORDER BY name;
                     ''')
             except sqlite3.OperationalError as err:
-                if 'no such table: shard_nodes' in str(err):
-                    self.create_shard_nodes_table(conn)
+                if 'no such table: pivot_nodes' in str(err):
+                    self.create_pivot_nodes_table(conn)
             finally:
                 return data
 
-    def get_all_shard_nodes_since(self, timestamp=None, limit=None):
-        data = []
-        self._commit_puts_stale_ok()
-        with self.get() as conn:
-            try:
-                sql = 'SELECT name, created_at, flag, deleted '
-                sql += 'FROM shard_nodes '
-                sql += 'WHERE created_at >= "%s" ' % timestamp \
-                    if timestamp else ''
-                sql += 'ORDER BY ROWID ASC'
-                sql += 'LIMIT %d' % limit if limit else ''
-                data = conn.execute(sql)
-            except sqlite3.OperationalError as err:
-                if 'no such table: shard_nodes' in str(err):
-                    self.create_shard_nodes_table(conn)
-            finally:
-                return data
-
-    def shard_nodes_to_items(self, nodes):
+    def pivot_nodes_to_items(self, nodes):
         result = list()
         for item in nodes:
             try:
@@ -973,8 +954,15 @@ class ContainerBroker(DatabaseBroker):
                     'etag': '',
                     'deleted': item[3] if len(item) > 3 else 0,
                     'storage_policy_index': 0,
-                    'record_type': RECORD_TYPE_TRIE_NODE}
+                    'record_type': RECORD_TYPE_PIVOT_NODE}
                 result.append(obj)
             except Exception:
                 continue
         return result
+
+    def build_pivot_trie(self):
+        trie = PivotTrie()
+
+        for node in self.get_pivot_nodes():
+            trie.add(node[0], node[1])
+        return trie
