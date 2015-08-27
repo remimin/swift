@@ -68,6 +68,7 @@ def gen_resp_headers(info, is_deleted=False):
             'X-Timestamp': Timestamp(info.get('created_at', 0)).normal,
             'X-PUT-Timestamp': Timestamp(
                 info.get('put_timestamp', 0)).normal,
+            'X-Backend-Pivot-Point': info.get('pivot_point', ''),
         })
     return headers
 

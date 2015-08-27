@@ -411,7 +411,8 @@ class ContainerBroker(DatabaseBroker):
                   object_count, bytes_used, reported_put_timestamp,
                   reported_delete_timestamp, reported_object_count,
                   reported_bytes_used, hash, id, x_container_sync_point1,
-                  x_container_sync_point2, and storage_policy_index.
+                  x_container_sync_point2, and storage_policy_index,
+                  pivot_point.
         """
         self._commit_puts_stale_ok()
         with self.get() as conn:
@@ -448,6 +449,14 @@ class ContainerBroker(DatabaseBroker):
             self._storage_policy_index = data['storage_policy_index']
             self.account = data['account']
             self.container = data['container']
+
+            if len(self.get_pivot_nodes()) == 0:
+                # This container can have objects, so find the current pivot
+                # point.
+                data['pivot_point'] = self.get_possible_pivot_point()
+            else:
+                data['pivot_point'] = ''
+
             return data
 
     def set_x_container_sync_points(self, sync_point1, sync_point2):
@@ -966,3 +975,30 @@ class ContainerBroker(DatabaseBroker):
         for node in self.get_pivot_nodes():
             trie.add(node[0], node[1])
         return trie
+
+    def get_possible_pivot_point(self):
+        """
+        Finds the middle entry of the table that could be used as a pivot
+        point when sharding. It finds the middle object and returns it.
+
+        If there is an error or no objects in the container it will return an
+        emply string ('').
+
+        :return: The middle object in the container.
+        """
+        self._commit_puts_stale_ok()
+        with self.get() as conn:
+            try:
+                data = conn.execute('''
+                    SELECT name
+                    FROM object
+                    WHERE deleted=0 LIMIT 1 OFFSET (
+                        SELECT reported_object_count / 2
+                        FROM container_info);
+                    ''')
+                if data:
+                    return data[0]
+                else:
+                    return ''
+            except Exception:
+                return ''
