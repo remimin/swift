@@ -997,7 +997,8 @@ class ContainerBroker(DatabaseBroker):
                         FROM container_info);
                     ''')
                 if data:
-                    return data[0]
+                    data = data.fetchone()
+                    return data['name']
                 else:
                     return ''
             except Exception:
