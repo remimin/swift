@@ -3819,3 +3819,24 @@ class PivotNode(object):
 
     def __getitem__(self, item):
         return self.get(item)
+
+def pivot_to_pivot_container(account, container, pivot_point, weight):
+        """
+        Using a specified pivot_point and weight, generate the required sharded
+        account and container name.
+
+        Given something like ``acc, cont, orange, -1`` it will return:
+
+            .sharded_acc cont<-orange
+
+        :param account: The root container's account
+        :param container: The root container
+        :param pivot_point: The pivot point
+        :param weight: The weight as provided by the PivotTrie (-1, 0, 1)
+        :return: A tuple of (account, container) representing the sharded
+                 container.
+        """
+        weight_to_str = {-1: '<-', 0: '<-', 1: '->'}
+        acc = ".sharded_%s" % account
+        cont = "%s%s%s" % (container, weight_to_str[weight], pivot_point)
+        return acc, cont

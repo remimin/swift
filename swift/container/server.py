@@ -24,6 +24,7 @@ from eventlet import Timeout
 import swift.common.db
 from swift.container.backend import ContainerBroker, DATADIR
 from swift.container.replicator import ContainerReplicatorRpc
+from swift.common import ring
 from swift.common.db import DatabaseAlreadyExists
 from swift.common.container_sync_realms import ContainerSyncRealms
 from swift.common.request_helpers import get_param, get_listing_content_type, \
@@ -31,7 +32,7 @@ from swift.common.request_helpers import get_param, get_listing_content_type, \
 from swift.common.utils import get_logger, hash_path, public, \
     Timestamp, storage_directory, validate_sync_to, \
     config_true_value, json, timing_stats, replication, \
-    override_bytes_from_content_type, get_log_line
+    override_bytes_from_content_type, get_log_line, pivot_to_pivot_container
 from swift.common.constraints import check_mount, valid_timestamp, check_utf8
 from swift.common import constraints
 from swift.common.bufferedhttp import http_connect
@@ -42,7 +43,7 @@ from swift.common.base_storage_server import BaseStorageServer
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPConflict, \
     HTTPCreated, HTTPInternalServerError, HTTPNoContent, HTTPNotFound, \
     HTTPPreconditionFailed, HTTPMethodNotAllowed, Request, Response, \
-    HTTPInsufficientStorage, HTTPException, HeaderKeyDict
+    HTTPInsufficientStorage, HTTPException, HeaderKeyDict, HTTPMovedPermanently
 
 
 def gen_resp_headers(info, is_deleted=False):
@@ -89,11 +90,11 @@ class ContainerController(BaseStorageServer):
         self.mount_check = config_true_value(conf.get('mount_check', 'true'))
         self.node_timeout = int(conf.get('node_timeout', 3))
         self.conn_timeout = float(conf.get('conn_timeout', 0.5))
+        swift_dir = conf.get('swift_dir', '/etc/swift')
+        self.ring = ring.Ring(swift_dir, ring_name='container')
         #: ContainerSyncCluster instance for validating sync-to values.
         self.realms_conf = ContainerSyncRealms(
-            os.path.join(
-                conf.get('swift_dir', '/etc/swift'),
-                'container-sync-realms.conf'),
+            os.path.join(swift_dir, 'container-sync-realms.conf'),
             self.logger)
         #: The list of hosts we're allowed to send syncs to. This can be
         #: overridden by data in self.realms_conf
@@ -341,6 +342,20 @@ class ContainerController(BaseStorageServer):
         requested_policy_index = self.get_and_validate_policy_index(req)
         broker = self._get_container_broker(drive, part, account, container)
         if obj:     # put container object
+            if len(broker.get_pivot_nodes()) > 0:
+                try:
+                    # This is a sharded root container, so we need figure out
+                    # where the obj should live and return a 301.
+                    pivotTrie = broker.build_pivot_trie()
+                    node, weight = pivotTrie.get(obj)
+                    piv_acc, piv_cont = pivot_to_pivot_container(
+                        account, container, node.key, weight)
+
+                    headers = {'X-Backend-Pivot-Account': piv_acc,
+                               'X-Backend-Pivot-Container': piv_cont}
+                    return HTTPMovedPermanently(headers=headers)
+                except:
+                    return HTTPInternalServerError()
             # obj put expects the policy_index header, default is for
             # legacy support during upgrade.
             obj_policy_index = requested_policy_index or 0
