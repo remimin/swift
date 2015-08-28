@@ -42,7 +42,7 @@ from swift.common.exceptions import ConnectionTimeout, DiskFileQuarantined, \
     DiskFileDeviceUnavailable, DiskFileExpired, ChunkReadTimeout, \
     DiskFileXattrNotSupported
 from swift.obj import ssync_receiver
-from swift.common.http import is_success
+from swift.common.http import is_success, HTTP_MOVED_PERMANENTLY
 from swift.common.base_storage_server import BaseStorageServer
 from swift.common.request_helpers import get_name_and_placement, \
     is_user_meta, is_sys_or_user_meta
@@ -236,7 +236,7 @@ class ObjectController(BaseStorageServer):
                     response.read()
                     if is_success(response.status):
                         return
-                    elif response.status_int == 301 and \
+                    elif response.status_int == HTTP_MOVED_PERMANENTLY and \
                             response.headers.get('X-Backend-Pivot-Container'):
                         # We have received a Permanent Move on a sharded
                         # container. Which means we need to redirect
@@ -271,6 +271,29 @@ class ObjectController(BaseStorageServer):
                 if redirect:
                     raise redirect
         except HTTPMovedPermanently as ex:
+            piv_acc = ex.headers.get('X-Backend-Pivot-Account')
+            piv_cont = ex.headers.get('X-Backend-Pivot-Container')
+            if not piv_acc or not piv_cont:
+                # there has been an error so log it and return
+                self.logger.error(_('ERROR Container update failed: %s/%s '
+                                    'possibly sharded but couldn\'t find '
+                                    'determine shard container location.')
+                                  % (account, container))
+                return
+
+            conthosts = [h.strip() for h in
+                         ex.headers.get('X-Container-Host', '').split(',')]
+            contdevices = [d.strip() for d in
+                           ex.headers.get('X-Container-Device', '').split(',')]
+            contpartition = ex.headers.get('X-Container-Partition', '')
+
+            if contpartition:
+                updates = zip(conthosts, contdevices)
+            else:
+                updates = []
+            self._container_update(op, piv_acc, piv_cont, obj, headers_out,
+                                   objdevice, updates, contpartition, policy)
+
 
 
     def container_update(self, op, account, container, obj, request,

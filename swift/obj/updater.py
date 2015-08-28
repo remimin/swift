@@ -19,7 +19,7 @@ import signal
 import sys
 import time
 from swift import gettext_ as _
-from random import random
+from random import random, shuffle
 
 from eventlet import spawn, patcher, Timeout
 
@@ -32,7 +32,8 @@ from swift.common.daemon import Daemon
 from swift.common.storage_policy import split_policy_string, PolicyError
 from swift.obj.diskfile import get_tmp_dir, ASYNCDIR_BASE
 from swift.common.http import is_success, HTTP_NOT_FOUND, \
-    HTTP_INTERNAL_SERVER_ERROR
+    HTTP_INTERNAL_SERVER_ERROR, HTTP_MOVED_PERMANENTLY
+from swift.common.swob import HTTPMovedPermanently
 
 
 class ObjectUpdater(Daemon):
@@ -194,6 +195,58 @@ class ObjectUpdater(Daemon):
                     pass
             self.logger.timing_since('timing', start_time)
 
+    def _process_object_update(self, account, container, obj, op, headers_out,
+                               successes):
+        # returns [(event_success, node_id)]
+        results = list()
+        part, nodes = self.get_container_ring().get_nodes(account, container)
+        object = '/%s/%s/%s' % (account, container, obj)
+
+        try:
+            # Sharded containers in swift means when we hit a root container
+            # that has been sharded, we'll receive a 301 (permanently moved),
+            # when we get one we get new orders (from the resp headers) to
+            # the nodes we really need to update.
+            # The problem is, in older versions of the updater we'd fire off
+            # all the updates at once. This is nice an efficient when you knew
+            # you were talking to the correct container. Now, if we get a 301
+            # we fire again (x replica count) at the next container.
+            # This will start somewhat of a request storm.
+            #
+            # So now, we'll fire off one request, if it's a 301 we can reroute,
+            # if it isn't then we can send of the rest of the requests all at
+            # once.
+            shuffle(nodes)
+            event_success, node_id, redirect = self.object_update(
+                nodes[0], part, op, object, headers_out)
+            if redirect:
+                raise redirect
+            results.append((event_success, node_id))
+
+            # In case the number of container replicas is 1.
+            if len(nodes) > 1:
+                events = [spawn(self.object_update,
+                                node, part, op, object, headers_out)
+                          for node in nodes[1:] if node['id'] not in successes]
+                for event in events:
+                    event_success, node_id, redirect = event.wait()
+                    if redirect:
+                        raise redirect
+                    results.append((event_success, node_id))
+        except HTTPMovedPermanently as ex:
+            piv_acc = ex.headers.get('X-Backend-Pivot-Account')
+            piv_cont = ex.headers.get('X-Backend-Pivot-Container')
+            if not piv_acc or not piv_cont:
+                # there has been an error so log it and return
+                self.logger.error(_('ERROR Container update failed: %s/%s '
+                                    'possibly sharded but couldn\'t find '
+                                    'determine shard container location.')
+                                  % (account, container))
+                return results
+            return self._process_object_update(piv_acc, piv_cont, obj, op,
+                                               headers_out, successes)
+        return results
+
     def process_object_update(self, update_path, device, policy):
         """
         Process the object information to be updated and update.
@@ -213,26 +266,24 @@ class ObjectUpdater(Daemon):
             renamer(update_path, target_path, fsync=False)
             return
         successes = update.get('successes', [])
-        part, nodes = self.get_container_ring().get_nodes(
-            update['account'], update['container'])
-        obj = '/%s/%s/%s' % \
-              (update['account'], update['container'], update['obj'])
         headers_out = update['headers'].copy()
         headers_out['user-agent'] = 'object-updater %s' % os.getpid()
         headers_out.setdefault('X-Backend-Storage-Policy-Index',
                                str(int(policy)))
-        events = [spawn(self.object_update,
-                        node, part, update['op'], obj, headers_out)
-                  for node in nodes if node['id'] not in successes]
+        update_results = self._process_object_update(
+            update['account'], update['container'], update['obj'], update['op'],
+            headers_out, successes)
+
         success = True
         new_successes = False
-        for event in events:
-            event_success, node_id = event.wait()
+        for event_success, node_id in update_results:
             if event_success is True:
                 successes.append(node_id)
                 new_successes = True
             else:
                 success = False
+        obj = "/%s/%s/%s" % (update['account'], update['container'],
+                             update['obj'])
         if success:
             self.successes += 1
             self.logger.increment('successes')
@@ -269,8 +320,10 @@ class ObjectUpdater(Daemon):
                 resp.read()
                 success = (is_success(resp.status) or
                            resp.status == HTTP_NOT_FOUND)
-                return (success, node['id'])
+                if resp.status_int == HTTP_MOVED_PERMANENTLY:
+                    return success, node['id'], resp
+                return success, node['id'], None
         except (Exception, Timeout):
             self.logger.exception(_('ERROR with remote server '
                                     '%(ip)s:%(port)s/%(device)s'), node)
-        return HTTP_INTERNAL_SERVER_ERROR, node['id']
+        return HTTP_INTERNAL_SERVER_ERROR, node['id'], None

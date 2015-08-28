@@ -20,6 +20,7 @@ from swift import gettext_ as _
 from xml.etree.cElementTree import Element, SubElement, tostring
 
 from eventlet import Timeout
+from operator import itemgetter
 
 import swift.common.db
 from swift.container.backend import ContainerBroker, DATADIR
@@ -265,6 +266,29 @@ class ContainerController(BaseStorageServer):
         if not os.path.exists(broker.db_file):
             return HTTPNotFound()
         if obj:     # delete object
+            if len(broker.get_pivot_nodes()) > 0:
+                try:
+                    # This is a sharded root container, so we need figure out
+                    # where the obj should live and return a 301.
+                    pivotTrie = broker.build_pivot_trie()
+                    node, weight = pivotTrie.get(obj)
+                    piv_acc, piv_cont = pivot_to_pivot_container(
+                        account, container, node.key, weight)
+
+                    part, nodes = self.ring.get_nodes(piv_acc, piv_cont)
+                    node_data = list()
+                    item_getter = itemgetter('ip', 'device')
+                    for node in nodes:
+                        node_data.append(item_getter(node))
+                    hosts, devices = zip(*node_data)
+                    headers = {'X-Backend-Pivot-Account': piv_acc,
+                               'X-Backend-Pivot-Container': piv_cont,
+                               'X-Container-Host': ','.join(hosts),
+                               'X-Container-Device': ','.join(devices),
+                               'X-Container-Partition': part}
+                    return HTTPMovedPermanently(headers=headers)
+                except:
+                    return HTTPInternalServerError()
             broker.delete_object(obj, req.headers.get('x-timestamp'),
                                  obj_policy_index)
             return HTTPNoContent(request=req)
@@ -351,8 +375,17 @@ class ContainerController(BaseStorageServer):
                     piv_acc, piv_cont = pivot_to_pivot_container(
                         account, container, node.key, weight)
 
+                    part, nodes = self.ring.get_nodes(piv_acc, piv_cont)
+                    node_data = list()
+                    item_getter = itemgetter('ip', 'device')
+                    for node in nodes:
+                        node_data.append(item_getter(node))
+                    hosts, devices = zip(*node_data)
                     headers = {'X-Backend-Pivot-Account': piv_acc,
-                               'X-Backend-Pivot-Container': piv_cont}
+                               'X-Backend-Pivot-Container': piv_cont,
+                               'X-Container-Host': ','.join(hosts),
+                               'X-Container-Device': ','.join(devices),
+                               'X-Container-Partition': part}
                     return HTTPMovedPermanently(headers=headers)
                 except:
                     return HTTPInternalServerError()
