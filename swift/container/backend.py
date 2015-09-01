@@ -32,6 +32,9 @@ SQLITE_ARG_LIMIT = 999
 
 DATADIR = 'containers'
 
+RECORD_TYPE_OBJECT = 0
+RECORD_TYPE_PIVOT_NODE = 1
+
 POLICY_STAT_TABLE_CREATE = '''
     CREATE TABLE policy_stat (
         storage_policy_index INTEGER PRIMARY KEY,
@@ -165,6 +168,7 @@ class ContainerBroker(DatabaseBroker):
         self.create_policy_stat_table(conn, storage_policy_index)
         self.create_container_info_table(conn, put_timestamp,
                                          storage_policy_index)
+        self.create_pivot_points_table(conn)
 
     def create_object_table(self, conn):
         """
@@ -297,17 +301,17 @@ class ContainerBroker(DatabaseBroker):
         """See :func:`swift.common.db.DatabaseBroker._commit_puts_load`"""
         data = pickle.loads(entry.decode('base64'))
         (name, timestamp, size, content_type, etag, deleted) = data[:6]
-        if len(data) > 6:
-            storage_policy_index = data[6]
-        else:
-            storage_policy_index = 0
+        storage_policy_index = data[6] if len(data) > 6 else 0
+        record_type = data[7] if len(data) > 7 else RECORD_TYPE_OBJECT
+
         item_list.append({'name': name,
                           'created_at': timestamp,
                           'size': size,
                           'content_type': content_type,
                           'etag': etag,
                           'deleted': deleted,
-                          'storage_policy_index': storage_policy_index})
+                          'storage_policy_index': storage_policy_index,
+                          'record_type': record_type})
 
     def empty(self):
         """
@@ -342,10 +346,10 @@ class ContainerBroker(DatabaseBroker):
     def make_tuple_for_pickle(self, record):
         return (record['name'], record['created_at'], record['size'],
                 record['content_type'], record['etag'], record['deleted'],
-                record['storage_policy_index'])
+                record['storage_policy_index'], record['record_type'])
 
     def put_object(self, name, timestamp, size, content_type, etag, deleted=0,
-                   storage_policy_index=0):
+                   storage_policy_index=0, record_type=RECORD_TYPE_OBJECT):
         """
         Creates an object in the DB with its metadata.
 
@@ -357,11 +361,14 @@ class ContainerBroker(DatabaseBroker):
         :param deleted: if True, marks the object as deleted and sets the
                         deleted_at timestamp to timestamp
         :param storage_policy_index: the storage policy index for the object
+        :param record_type: The type of record this is (either references
+                            object data or a pivot point)
         """
         record = {'name': name, 'created_at': timestamp, 'size': size,
                   'content_type': content_type, 'etag': etag,
                   'deleted': deleted,
-                  'storage_policy_index': storage_policy_index}
+                  'storage_policy_index': storage_policy_index,
+                  'record_type': record_type}
         self.put_record(record)
 
     def _is_deleted_info(self, object_count, put_timestamp, delete_timestamp,
@@ -401,6 +408,11 @@ class ContainerBroker(DatabaseBroker):
             return {}, True
         info = self.get_info()
         return info, self._is_deleted_info(**info)
+
+    def get_replication_info(self):
+        info = super(ContainerBroker, self).get_replication_info()
+        info['pivot_max_row'] = self.get_max_row('pivot_points')
+        return info
 
     def get_info(self):
         """
@@ -709,36 +721,50 @@ class ContainerBroker(DatabaseBroker):
 
         :param item_list: list of dictionaries of {'name', 'created_at',
                           'size', 'content_type', 'etag', 'deleted',
-                          'storage_policy_index'}
+                          'storage_policy_index', 'record_type'}
         :param source: if defined, update incoming_sync with the source
         """
         for item in item_list:
+            item.setdefault('record_type', RECORD_TYPE_OBJECT)
             if isinstance(item['name'], unicode):
                 item['name'] = item['name'].encode('utf-8')
 
-        def _really_merge_items(conn):
-            curs = conn.cursor()
+        pivot_point_list = [item for item in item_list
+                          if item['record_type'] == RECORD_TYPE_PIVOT_NODE]
+
+        item_list = [item for item in item_list
+                     if item['record_type'] == RECORD_TYPE_OBJECT]
+
+        def _merge_items_by_type(curs, rec_type='object'):
+            obj = rec_type == 'object'
+            if obj:
+                rec_list = item_list
+            else:
+                rec_list = pivot_point_list
+
             if self.get_db_version(conn) >= 1:
                 query_mod = ' deleted IN (0, 1) AND '
             else:
                 query_mod = ''
-            curs.execute('BEGIN IMMEDIATE')
-            # Get created_at times for objects in item_list that already exist.
+            # Get created_at times for objects in rec_list that already exist.
             # We must chunk it up to avoid sqlite's limit of 999 args.
             created_at = {}
-            for offset in range(0, len(item_list), SQLITE_ARG_LIMIT):
+            for offset in range(0, len(rec_list), SQLITE_ARG_LIMIT):
                 chunk = [rec['name'] for rec in
-                         item_list[offset:offset + SQLITE_ARG_LIMIT]]
+                         rec_list[offset:offset + SQLITE_ARG_LIMIT]]
+                sql = 'SELECT name, '
+                sql += 'storage_policy_index' if obj else '0'
+                sql += ', created_at '
+                sql += 'FROM %s WHERE ' % rec_type
+                sql += query_mod + ' name IN (%s)' % ','.join('?' * len(chunk))
                 created_at.update(
                     ((rec[0], rec[1]), rec[2]) for rec in curs.execute(
-                        'SELECT name, storage_policy_index, created_at '
-                        'FROM object WHERE ' + query_mod + ' name IN (%s)' %
-                        ','.join('?' * len(chunk)), chunk))
+                        sql, chunk))
             # Sort item_list into things that need adding and deleting, based
             # on results of created_at query.
             to_delete = {}
             to_add = {}
-            for item in item_list:
+            for item in rec_list:
                 item.setdefault('storage_policy_index', 0)  # legacy
                 item_ident = (item['name'], item['storage_policy_index'])
                 if created_at.get(item_ident) < item['created_at']:
@@ -750,21 +776,41 @@ class ContainerBroker(DatabaseBroker):
                     else:
                         to_add[item_ident] = item
             if to_delete:
-                curs.executemany(
-                    'DELETE FROM object WHERE ' + query_mod +
-                    'name=? AND storage_policy_index=?',
-                    ((rec['name'], rec['storage_policy_index'])
-                     for rec in to_delete.itervalues()))
+                sql = 'DELETE FROM %s WHERE ' % rec_type
+                sql += query_mod + 'name=? '
+                sql += 'AND storage_policy_index=?' if obj else ''
+                if obj:
+                    del_generator = ((rec['name'], rec['storage_policy_index'])
+                                     for rec in to_delete.itervalues())
+                else:
+                    del_generator = ([rec['name']]
+                                     for rec in to_delete.itervalues())
+                curs.executemany(sql, del_generator)
             if to_add:
-                curs.executemany(
-                    'INSERT INTO object (name, created_at, size, content_type,'
-                    'etag, deleted, storage_policy_index)'
-                    'VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    ((rec['name'], rec['created_at'], rec['size'],
-                      rec['content_type'], rec['etag'], rec['deleted'],
-                      rec['storage_policy_index'])
-                     for rec in to_add.itervalues()))
-            if source:
+                if obj:
+                    curs.executemany(
+                        'INSERT INTO object (name, created_at, size, '
+                        'content_type, etag, deleted, storage_policy_index)'
+                        'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                        ((rec['name'], rec['created_at'], rec['size'],
+                         rec['content_type'], rec['etag'], rec['deleted'],
+                         rec['storage_policy_index'])
+                         for rec in to_add.itervalues()))
+                else:
+                    curs.executemany(
+                        'INSERT INTO pivot_points (name, created_at, deleted)'
+                        'VALUES (?, ?, ?)',
+                        ((rec['name'], rec['created_at'], rec['deleted'])
+                         for rec in to_add.itervalues()))
+
+        def _really_merge_items(conn):
+            curs = conn.cursor()
+            curs.execute('BEGIN IMMEDIATE')
+            if item_list:
+                _merge_items_by_type(curs, 'object')
+            if pivot_point_list:
+                _merge_items_by_type(curs, 'pivot_points')
+            if source and item_list:
                 # for replication we rely on the remote end sending merges in
                 # order with no gaps to increment sync_points
                 sync_point = item_list[-1]['ROWID']
