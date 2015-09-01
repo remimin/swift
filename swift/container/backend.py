@@ -24,7 +24,7 @@ import six.moves.cPickle as pickle
 from six.moves import range
 import sqlite3
 
-from swift.common.utils import Timestamp, PivotTrie
+from swift.common.utils import Timestamp, PivotTree
 from swift.common.db import DatabaseBroker, utf8encode
 
 
@@ -246,7 +246,7 @@ class ContainerBroker(DatabaseBroker):
             VALUES (?)
         """, (storage_policy_index,))
 
-    def create_pivot_nodes_table(self, conn):
+    def create_pivot_points_table(self, conn):
         """
         Create the shard_nodes table which is specific to the container DB.
 
@@ -254,7 +254,7 @@ class ContainerBroker(DatabaseBroker):
         """
         try:
             conn.executescript("""
-                CREATE TABLE pivot_nodes (
+                CREATE TABLE pivot_points (
                     ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT,
                     created_at TEXT,
@@ -450,7 +450,7 @@ class ContainerBroker(DatabaseBroker):
             self.account = data['account']
             self.container = data['container']
 
-            if len(self.get_pivot_nodes()) == 0:
+            if len(self.get_pivot_points()) == 0:
                 # This container can have objects, so find the current pivot
                 # point.
                 data['pivot_point'] = self.get_possible_pivot_point()
@@ -934,20 +934,20 @@ class ContainerBroker(DatabaseBroker):
             CONTAINER_STAT_VIEW_SCRIPT +
             'COMMIT;')
 
-    def get_pivot_nodes(self):
+    def get_pivot_points(self):
         data = []
         self._commit_puts_stale_ok()
         with self.get() as conn:
             try:
                 data = conn.execute('''
                     SELECT name, created_at
-                    FROM pivot_nodes
+                    FROM pivot_points
                     WHERE deleted=0
                     ORDER BY name;
                     ''')
             except sqlite3.OperationalError as err:
-                if 'no such table: pivot_nodes' in str(err):
-                    self.create_pivot_nodes_table(conn)
+                if 'no such table: pivot_points' in str(err):
+                    self.create_pivot_points_table(conn)
             finally:
                 return data
 
@@ -969,12 +969,12 @@ class ContainerBroker(DatabaseBroker):
                 continue
         return result
 
-    def build_pivot_trie(self):
-        trie = PivotTrie()
+    def build_pivot_tree(self):
+        tree = PivotTree()
 
-        for node in self.get_pivot_nodes():
-            trie.add(node[0], node[1])
-        return trie
+        for node in self.get_pivot_points():
+            tree.add(node[0], node[1])
+        return tree
 
     def get_possible_pivot_point(self):
         """

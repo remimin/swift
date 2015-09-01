@@ -366,12 +366,12 @@ class ContainerController(BaseStorageServer):
         requested_policy_index = self.get_and_validate_policy_index(req)
         broker = self._get_container_broker(drive, part, account, container)
         if obj:     # put container object
-            if len(broker.get_pivot_nodes()) > 0:
+            if len(broker.get_pivot_points()) > 0:
                 try:
                     # This is a sharded root container, so we need figure out
                     # where the obj should live and return a 301.
-                    pivotTrie = broker.build_pivot_trie()
-                    node, weight = pivotTrie.get(obj)
+                    pivotTree = broker.build_pivot_tree()
+                    node, weight = pivotTree.get(obj)
                     piv_acc, piv_cont = pivot_to_pivot_container(
                         account, container, node.key, weight)
 

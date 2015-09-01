@@ -3661,7 +3661,7 @@ def get_md5_socket():
 
     return md5_sockfd
 
-class PivotTrie(object):
+class PivotTree(object):
     def __init__(self, root=None, disable_timestamps=False):
         self._disable_timestamps = disable_timestamps
         if root:
