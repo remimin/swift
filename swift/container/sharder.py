@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import errno
+import json
 import math
 import os
 import time
@@ -25,18 +26,20 @@ from eventlet import Timeout, GreenPool
 
 from swift.container.replicator import ContainerReplicator
 from swift.container.backend import ContainerBroker, DATADIR, \
-    RECORD_TYPE_TRIE_NODE, RECORD_TYPE_OBJECT
+    RECORD_TYPE_PIVOT_NODE, RECORD_TYPE_OBJECT
 from swift.common import ring, internal_client
+from swift.common.bufferedhttp import http_connect
 from swift.common.db import DatabaseAlreadyExists
-from swift.common.exceptions import DeviceUnavailable
+from swift.common.exceptions import DeviceUnavailable, ConnectionTimeout
+from swift.common.http import is_success
 from swift.common.request_helpers import get_container_shard_path
-from swift.common.shardtrie import ShardTrieDistributedBranchException, \
-    ShardTrie, DISTRIBUTED_BRANCH, to_shard_trie, CountingTrie
-from swift.common.constraints import SHARD_GROUP_COUNT, CONTAINER_LISTING_LIMIT
+from swift.common.constraints import CONTAINER_LISTING_LIMIT, \
+    SHARD_CONTAINER_SIZE
 from swift.common.ring.utils import is_local_device
 from swift.common.utils import get_logger, audit_location_generator, \
     config_true_value, dump_recon_cache, whataremyips, hash_path, \
-    storage_directory, Timestamp
+    storage_directory, Timestamp, PivotTree, pivot_to_pivot_container, \
+    pivot_container_to_pivot
 from swift.common.wsgi import ConfigString
 from swift.common.storage_policy import POLICIES
 
@@ -114,8 +117,7 @@ class ContainerSharder(ContainerReplicator):
         self.vm_test_mode = config_true_value(conf.get('vm_test_mode', 'no'))
         concurrency = int(conf.get('concurrency', 8))
         self.cpool = GreenPool(size=concurrency)
-        self.shard_group_count = int(conf.get('shard_group_count',
-                                              SHARD_GROUP_COUNT))
+
         self.node_timeout = int(conf.get('node_timeout', 10))
         self.reclaim_age = float(conf.get('reclaim_age', 86400 * 7))
         self.extract_device_re = re.compile('%s%s([^%s]+)' % (
@@ -155,47 +157,38 @@ class ContainerSharder(ContainerReplicator):
     def _get_local_devices(self):
         self._local_device_ids = set()
         results = set()
-        ips = whataremyips()
-        if not ips:
+        self.ips = whataremyips()
+        if not self.ips:
             self.logger.error(_('ERROR Failed to get my own IPs?'))
             return
         for node in self.ring.devs:
-            if node and is_local_device(ips, self.port,
+            if node and is_local_device(self.ips, self.port,
                                         node['replication_ip'],
                                         node['replication_port']):
                 results.add(node['device'])
                 self._local_device_ids.add(node['id'])
         return results
 
-    def _get_shard_trie(self, account, container, newest=False):
+    def _get_pivot_tree(self, account, container, newest=False):
         path = self.swift.make_path(account, container) + \
-            '?format=trie&trie_nodes=distributed'
-        headers = {'X-Skip-Sharding': 'On'}
+            '?nodes=pivot&format=json'
+        headers = dict()
         if newest:
             headers['X-Newest'] = 'true'
         resp = self.swift.make_request('GET', path, headers,
                                        acceptable_statuses=(2,))
-        return to_shard_trie(resp.body)
-
-    def _find_shard_container_prefix(self, trie, key, account, container,
-                                     trie_cache):
+        if not resp.is_success:
+            self.logger.error(_("Failed to get pivot points from %s/%s"),
+                              account, container)
+            return None
+        tree = PivotTree()
         try:
-            _node = trie[key]
-            return trie.root_key
-        except ShardTrieDistributedBranchException as ex:
-            dist_key = ex.key
-            if dist_key in trie_cache:
-                new_trie = trie_cache[dist_key]
-            else:
-                acct, cont = get_container_shard_path(account, container,
-                                                      dist_key)
-                new_trie = self._get_shard_trie(acct, cont)
-                if new_trie.is_empty():
-                    new_trie._root._key = ex.key
-                new_trie.trim_trunk()
-                trie_cache[dist_key] = new_trie
-            return self._find_shard_container_prefix(new_trie, key, account,
-                                                     container, trie_cache)
+            for pivot in json.load(resp.body):
+                tree.add(pivot)
+        except ValueError as ex:
+            # Failed to decode the json response
+            return None
+        return tree
 
     def _get_shard_broker(self, account, container, policy_index):
         """
@@ -229,82 +222,55 @@ class ContainerSharder(ContainerReplicator):
         self.shard_brokers[container] = part, broker, node['id']
         return broker
 
-    def _generate_object_list(self, objs_or_trie, policy_index, delete=False,
-                              timestamp=None, filter_dist=False):
+    def _generate_object_list(self, items, policy_index, delete=False,
+                              timestamp=None):
         """
         Create a list of dictionary items ready to be consumed by
         Broker.merge_items()
 
-        :param objs_or_trie: list of objects or ShardTrie object
+        :param items: list of objects
         :param policy_index: the Policy index of the container
         :param delete: mark the objects as deleted; default False
         :param timestamp: set the objects timestamp to the provided one.
                This is used specifically when deleting objects that have been
                sharded away.
-        :param filter_dist: filter out distributed nodes from the list.
 
         :return: A list of item dictionaries ready to be consumed by
                  merge_items.
         """
         objs = list()
-        if isinstance(objs_or_trie, ShardTrie):
-            if filter_dist:
-                item_iter = objs_or_trie.get_data_nodes()
+        for item in items:
+            try:
+                obj = {
+                    'name': item[0],
+                    'created_at': timestamp or item[1]}
+                if len(item) > 3:
+                    # object item
+                    obj.update({
+                        'size': item[2],
+                        'content_type': item[3],
+                        'etag': item[4],
+                        'deleted': 1 if delete else 0,
+                        'storage_policy_index': policy_index,
+                        'record_type': RECORD_TYPE_OBJECT})
+                else:
+                    # pivot node
+                    obj.update({
+                        'size': 0,
+                        'content_type': '',
+                        'etag': '',
+                        'deleted': 1 if delete else 0,
+                        'storage_policy_index': 0,
+                        'record_type': RECORD_TYPE_PIVOT_NODE})
+            except Exception:
+                self.logger.warning(_("Failed to add object %s, not in the"
+                                      'right format'),
+                                    item[0] if item[0] else str(item))
             else:
-                item_iter = objs_or_trie.get_important_nodes()
-            for node in item_iter:
-                if node.flag == DISTRIBUTED_BRANCH:
-                    obj = {'name': node.full_key(),
-                           'created_at': timestamp or node.timestamp,
-                           'size': 0,
-                           'content_type': '',
-                           'etag': '',
-                           'deleted': 1 if delete else 0,
-                           'storage_policy_index': policy_index,
-                           'record_type': RECORD_TYPE_TRIE_NODE}
-                else:
-                    obj = {'name': node.full_key(),
-                           'created_at': timestamp or node.timestamp,
-                           'size': node.data['size'],
-                           'content_type': node.data['content_type'],
-                           'etag': node.data['etag'],
-                           'deleted': 1 if delete else 0,
-                           'storage_policy_index': policy_index,
-                           'record_type': RECORD_TYPE_OBJECT}
                 objs.append(obj)
-        else:
-            for item in objs_or_trie:
-                try:
-                    obj = {
-                        'name': item[0],
-                        'created_at': timestamp or item[1]}
-                    if len(item) > 3:
-                        # object item
-                        obj.update({
-                            'size': item[2],
-                            'content_type': item[3],
-                            'etag': item[4],
-                            'deleted': 1 if delete else 0,
-                            'storage_policy_index': policy_index,
-                            'record_type': RECORD_TYPE_OBJECT})
-                    else:
-                        # Trie node
-                        obj.update({
-                            'size': 0,
-                            'content_type': '',
-                            'etag': '',
-                            'deleted': 1 if delete else 0,
-                            'storage_policy_index': 0,
-                            'record_type': RECORD_TYPE_TRIE_NODE})
-                except Exception:
-                    self.logger.warning(_("Failed to add object %s, not in the"
-                                          'right format'),
-                                        item[0] if item[0] else str(item))
-                else:
-                    objs.append(obj)
         return objs
 
-    def _get_and_fill_shard_broker(self, prefix, objs_or_trie, account,
+    def _get_and_fill_shard_broker(self, pivot, weight, items, account,
                                    container, policy_index, delete=False,
                                    timestamp=None):
         """
@@ -313,8 +279,8 @@ class ContainerSharder(ContainerReplicator):
         sharding metadata and adds the objects from either a list (as you get
         from the container backend) or a ShardTrie object.
 
-        :param prefix: The prefix of the shard trie.
-        :param objs_or_trie: A list of objects or a ShardTrie to grab the
+        :param pivot: The pivot the shard belongs.
+        :param items: A list of objects or pivot points
                objects from.
         :param account: The root shard account (the original account).
         :param container: The root shard container (the original container).
@@ -322,7 +288,8 @@ class ContainerSharder(ContainerReplicator):
         :param delete:
         :return: A database broker or None (if failed to grab one)
         """
-        acct, cont = get_container_shard_path(account, container, prefix)
+        acct, cont = pivot_to_pivot_container(account, container, pivot,
+                                              weight)
         try:
             broker = self._get_shard_broker(acct, cont, policy_index)
         except DeviceUnavailable as duex:
@@ -330,57 +297,110 @@ class ContainerSharder(ContainerReplicator):
             return None
 
         if not broker.metadata.get('X-Container-Sysmeta-Shard-Account') \
-                and prefix:
+                and pivot:
             timestamp = Timestamp(time.time()).internal
             broker.update_metadata({
                 'X-Container-Sysmeta-Shard-Account': (account, timestamp),
-                'X-Container-Sysmeta-Shard-Container': (container, timestamp),
-                'X-Container-Sysmeta-Shard-Prefix': (prefix, timestamp)})
+                'X-Container-Sysmeta-Shard-Container': (container, timestamp)})
 
-        objects = self._generate_object_list(objs_or_trie, policy_index,
+        objects = self._generate_object_list(items, policy_index,
                                              delete, timestamp=timestamp)
         broker.merge_items(objects)
 
         return self.shard_brokers[cont]
 
-    def _deal_with_misplaced_objects(self, broker, misplaced, account,
-                                     container, policy_index):
+    def _misplaced_objects(self, broker, root_account, root_container, pivot,
+                           weight):
         """
 
         :param broker: The parent broker to update once misplaced objects have
                        been moved.
-        :param misplaced: The list of misplaced objects as defined by the
-                          CountingTrie
-        :param account: The root account
-        :param container: The root container
-        :param policy_index: The policy index of the container
+        :param root_account: The root account
+        :param root_container: The root container
+        :param pivot: The pivot point of the container
+        :param weight: The weight (side of the pivot) for this container
         """
-        trie_cache = {}
-        shard_prefix_to_obj = {}
+        tree_cache = {}
+        queries = []
+        policy_index = broker.storage_policy_index
+        query = dict(marker='', end_marker='', prefix='', delimiter='',
+                     storage_policy_index=policy_index)
+        if len(broker.get_pivot_points()) > 0:
+            # It's a sharded node, so anything in the object table
+            # is misplaced.
+            if broker.get_info()['object_count'] > 0:
+                queries.append(query.copy())
+        else:
+            # it hasn't been sharded, so we need to look for objects that
+            # shouldn't be in the object table.
+            # First lets get the bounds of the pivot, for this we need
+            # the entire pivot tree.
+            tree = self._get_pivot_tree(root_account, root_container,
+                                        newest=True)
+            tree_cache[''] = tree
+            gt, lt = tree.get_pivot_bounds(pivot)
 
-        # Get root shard, in case the objects should be in a previous shard.
-        trie = self._get_shard_trie(account, container)
-        trie_cache[''] = trie
-
-        # [(key, self.full_key, data)]
-        # for obj, _node in misplaced:
-        for obj, dist_key, data in misplaced:
-            prefix = self._find_shard_container_prefix(trie, obj, account,
-                                                       container, trie_cache)
-            if shard_prefix_to_obj.get(prefix):
-                shard_prefix_to_obj[prefix].append(data)
+            # Because we know what side of the pivot this container rests
+            # we can reduce the bounds some more.
+            if weight <= 0:
+                # Left side, so only objects less than (lt) this containers
+                # pivot
+                lt = pivot
             else:
-                shard_prefix_to_obj[prefix] = [data]
+                # right side, to greater than (gt) pivot
+                gt = pivot
 
-        self.logger.info(_('preparing to move misplaced objects found '
-                           'in %s/%s'), account, container)
-        for shard_prefix, obj_list in shard_prefix_to_obj.iteritems():
-            part, new_broker, node_id = self._get_and_fill_shard_broker(
-                shard_prefix, obj_list, account, container, policy_index)
+            queries.extend((query.copy().update({'marker': lt}),
+                            query.copy().update({'end_marker': gt})))
 
-            self.cpool.spawn_n(
-                self._replicate_object, part, new_broker.db_file, node_id)
-        self.cpool.waitall()
+        timestamp = Timestamp(time.time()).internal
+
+        def run_query(query):
+            objs = broker.list_objects_iter(CONTAINER_LISTING_LIMIT, **query)
+            if not objs:
+                return
+
+            # We have a list of misplaced objects, so we better find a home
+            # for them
+            tree = tree_cache.get('')
+            if not tree:
+                tree = self._get_pivot_tree(root_account, root_container,
+                                            newest=True)
+                tree_cache[''] = tree
+
+            pivot_to_obj = {}
+            for obj in objs:
+                p, w = tree.get(obj[0])
+
+                if (p, w) in pivot_to_obj:
+                    pivot_to_obj[p].append(obj)
+                else:
+                    pivot_to_obj[(p, w)] = [obj]
+                query['marker'] = obj[0]
+
+            self.logger.info(_('preparing to move misplaced objects found '
+                               'in %s/%s'), broker.account, broker.container)
+            for p_and_w, obj_list in pivot_to_obj.iteritems():
+                part, new_broker, node_id = self._get_and_fill_shard_broker(
+                    p_and_w[0], p_and_w[1], obj_list, root_account,
+                    root_container, policy_index)
+
+                self.cpool.spawn_n(
+                    self._replicate_object, part, new_broker.db_file, node_id)
+
+                # Remove the now relocated misplaced items.
+                items = self._generate_object_list(obj_list, policy_index,
+                                                   delete=True,
+                                                   timestamp=timestamp)
+                broker.merge_items(items)
+            self.cpool.waitall()
+
+            if len(objs) == CONTAINER_LISTING_LIMIT:
+                # There could be more, so recurse my pretty
+                run_query(query)
+
+        for query in queries:
+            run_query(query)
 
         # wipe out the cache do disable bypass in delete_db
         cleanups = self.shard_cleanups
@@ -390,13 +410,6 @@ class ContainerSharder(ContainerReplicator):
         for container in cleanups.values():
             self.cpool.spawn_n(self.delete_db, container)
         self.cpool.waitall()
-
-        # Remove the now relocated misplaced items.
-        timestamp = Timestamp(time.time()).internal
-        objs = [data for obj, dist_key, data in misplaced]
-        items = self._generate_object_list(objs, policy_index, delete=True,
-                                           timestamp=timestamp)
-        broker.merge_items(items)
         self.logger.info('Finished misplaced shard replication')
 
     @staticmethod
@@ -443,7 +456,7 @@ class ContainerSharder(ContainerReplicator):
             return
         return super(ContainerReplicator, self).delete_db(broker)
 
-    def _audit_shard_container(self, broker, prefix, root_account=None,
+    def _audit_shard_container(self, broker, pivot, root_account=None,
                                root_container=None):
         continue_with_container = True
         if not root_account or not root_container:
@@ -457,50 +470,31 @@ class ContainerSharder(ContainerReplicator):
             return continue_with_container
 
         root_ok = parent_ok = False
-        parent_prefix = None
+        parent = None
         # Get the root view of the world.
-        trie = self._get_shard_trie(root_account, root_container, newest=True)
-        try:
-            node = trie.get_node(prefix)
-            if node:
-                root_ok = True
-                # the node exists so now we need to find the parent (if there
-                # is one)
-                while node.parent is not None:
-                    node = node.parent
-                    if node.flag == DISTRIBUTED_BRANCH:
-                        parent_prefix = node.full_key()
-                        break
-                if node.key == trie.root_key:
-                    # Root is the parent.
-                    parent_ok = True
+        tree = self._get_pivot_tree(root_account, root_container, newest=True)
+        node, _weight = tree.get(pivot)
+        if node:
+            root_ok = True
+            # the node exists so now we need to find the parent (if there
+            # is one)
+            if node.parent == None:
+                # Parent is root
+                parent_ok = True
             else:
-                # node not in root, even worse because no distributed branch
-                # exception was thrown, root should also be it's parent.
-                pass
-        except ShardTrieDistributedBranchException as ex:
-            # Container doesn't exist in root, but we do
-            # have the parent container's prefix now.
-            parent_prefix = ex.key
+                if node.parent.left == node:
+                    weight = -1
+                else:
+                    weight = 1
+                parent = (node.key, weight)
 
-        if parent_prefix:
-            # We need to check the parent trie.
-            acct, cont = get_container_shard_path(root_account, root_container,
-                                                  parent_prefix)
-            trie = self._get_shard_trie(acct, cont, newest=True)
-            try:
-                node = trie.get_node(prefix)
-                if node:
-                    parent_ok = True
-            except ShardTrieDistributedBranchException:
-                # If we get here, then we are in the strange position where
-                # the parent thinks the node exists in another sub trie,
-                # meaning the parent believes it is not the parent of our
-                # container. This means that it's been sharded but the root
-                # isn't up to date, we will mark as found for now as the
-                # sharder will find the new container and audit it fixing the
-                # root container if it failed, or we just happened to get a
-                # root container just before it was updated.
+        if parent:
+            # We need to check the pivot_nodes.
+            acct, cont = pivot_to_pivot_container(root_account, root_container,
+                                                  *parent)
+            tree = self._get_pivot_tree(acct, cont, newest=True)
+            node = tree.get(pivot)
+            if node:
                 parent_ok = True
 
         if parent_ok and root_ok:
@@ -518,21 +512,21 @@ class ContainerSharder(ContainerReplicator):
             continue_with_container = False
             return continue_with_container
 
-        trie = ShardTrie()
         timestamp = Timestamp(time.time()).internal
-        trie.add(prefix, flag=DISTRIBUTED_BRANCH, timestamp=timestamp)
+        pivot_point = (pivot, timestamp)
         if not parent_ok:
             # Update parent
-            if parent_prefix:
-                acct, cont = get_container_shard_path(root_account,
+            if parent:
+                acct, cont = pivot_to_pivot_container(root_account,
                                                       root_container,
-                                                      parent_prefix)
+                                                      *parent)
                 self.logger.info(_("Shard container '%s/%s' is missing from "
                                    "its parent container '%s/%s', "
                                    "correcting."),
                                  broker.account, broker.container, acct, cont)
-                self._push_dist_node_to_container(parent_prefix, root_account,
-                                                  root_container, trie,
+                self._push_pivot_point_to_container(parent[0], parent[1],
+                                                  root_account,
+                                                  root_container, pivot_point,
                                                   broker.storage_policy_index)
         elif not root_ok:
             # update root container
@@ -540,12 +534,25 @@ class ContainerSharder(ContainerReplicator):
                                "the root container '%s/%s', correcting."),
                              broker.account, broker.container,
                              root_account, root_container)
-            self._push_dist_node_to_container('', root_account, root_container,
-                                              trie,
+            self._push_pivot_point_to_container('', root_account, root_container,
+                                              pivot_point,
                                               broker.storage_policy_index)
         return continue_with_container
 
     def _one_shard_pass(self, reported):
+        """
+        The main function, everything the sharder does forks from this method.
+
+        The sharder loops through each sharded container on server, on each
+        container it:
+            - audits the container
+            - checks and deals with misplaced items
+            - 2 phase sharding
+                - Phase 1, if there is no pivot defined, find it, then move
+                  to next container.
+                - Phase 2, if there is a pivot defined, shard it.
+        :param reported:
+        """
         self._zero_stats()
         local_devs = self._get_local_devices()
 
@@ -567,103 +574,48 @@ class ContainerSharder(ContainerReplicator):
                 continue
             if broker.is_deleted():
                 # This container is deleted so we can skip it.
-                # TODO may need to think about what happens if the container
-                # is "deleted" but non-deleted items exist in the object table,
-                # if that's even possible (eventual consistancy may, need to
-                # look into what happens in container-replicator when one is
-                # deleted to be sure).
                 continue
             root_account, root_container = \
                 ContainerSharder.get_shard_root_path(broker)
-            prefix = broker.metadata.get('X-Container-Sysmeta-Shard-Prefix')
-            prefix = '' if prefix is None else prefix[0]
-            
+            pivot, weight = pivot_container_to_pivot(root_container,
+                                                     broker.container)
+
             is_root = root_container == broker.container
 
             # Before we do any heavy lifting, lets do an audit on the shard
-            # container. We grab the root's view of the dist_nodes and make
+            # container. We grab the root's view of the pivot_points and make
             # sure this container exists in it and in what should be it's
             # parent. If its in both great, If it exists in either but not the
             # other, then this needs to be fixed. If, however, it doesn't
             # exist in either then this container may not exist anymore so
             # quarantine it.
-            if not self._audit_shard_container(broker, prefix, root_account,
+            if not self._audit_shard_container(broker, pivot, root_account,
                                                root_container):
                 continue
 
-            # Load everything into the count trie
-            counting_trie = CountingTrie(prefix, self.shard_group_count)
-            self.logger.info(_('Starting scanning for best candidate subtree'
-                               ' to for sharing'))
-            if not is_root:
-                # Search for misplaced distributed items
-                for dist_item in broker.get_shard_nodes():
-                    counting_trie.add(dist_item[0], distributed=True,
-                                      data=dist_item)
+            # now look and deal with misplaced objects.
+            self._misplaced_objects(broker, root_account, root_container,
+                                    pivot, weight)
 
-            # Now we need to load the objects into the CountingTrie, special
-            # attention needs to be given with distributed nodes because we
-            # are also using the CountingTrie as a mechanism to find misplaced
-            # objects.
-            marker = ''
-            done = False
-            obj_iter = broker.list_objects_iter(CONTAINER_LISTING_LIMIT,
-                                                marker, '', '', '')
-            dist_iter = iter(broker.get_shard_nodes())
-            try:
-                ditem = dist_iter.next()
-            except StopIteration:
-                ditem = None
+            self.shard_brokers = dict()
+            self.shard_cleanups = dict()
 
-            while not done:
-                count = 0
-                for item in obj_iter:
-                    while ditem and (item[0].startswith(ditem[0])
-                                     or item[0] > ditem[0]):
-                        if item[0].startswith(ditem[0]):
-                            counting_trie.add(ditem[0], True, ditem)
-                        try:
-                            ditem = dist_iter.next()
-                        except StopIteration:
-                            ditem = None
+            # Sharding is 2 phase
+            # If a pivot point is defined, we shard on it.. if it isn't then
+            # we see if we need to find a pivot point and set it for the next
+            # parse to shard.
+            new_pivot = broker.metadata.get('X-Container-Sysmeta-Shard-Pivot')
+            new_pivot = '' if new_pivot is None else new_pivot[0]
 
-                    count += 1
-                    marker = item[0]
-                    counting_trie.add(item[0], data=item)
-                if count < CONTAINER_LISTING_LIMIT:
-                    done = True
-                else:
-                    obj_iter = broker.list_objects_iter(
-                        CONTAINER_LISTING_LIMIT, marker, '', '', '')
-            self.logger.info(_('Candidate subtree scan complete'))
-
-            if counting_trie.misplaced:
-                # There are objects that shouldn't be in this trie, that is to
-                # say, they live beyond a distributed node, so we need to move
-                # them to the correct node.
-                self._deal_with_misplaced_objects(
-                    broker, counting_trie.misplaced, root_account,
-                    root_container, broker.storage_policy_index)
-
-                self.shard_brokers = dict()
-                self.shard_cleanups = dict()
-
-            if counting_trie.candidates:
-                # There is a candidate subtrie for sharding, so we can split
-                # this container.
-                candidate = counting_trie.candidates[0]
-                self._split_container(broker, candidate)
+            if pivot:
+                # We need to shard on the pivot point
+                self._shard_on_pivot(new_pivot, broker, root_account,
+                                     root_container)
             else:
-                # There are no candidates, lets see if it's small enough to
-                # merge back into it's parent (shrink).
-                info = broker.get_info()
-
-                # 10% of shard_group_count
-                shrink_max = math.ceil(self.shard_group_count * 0.1)
-                count = info.get('object_count')
-                if count and count in (None, '', 0, '0') or \
-                        int(count) < max(shrink_max, 10):
-                    self._shrink_trie(broker)
+                # No pivot, so check to see if a pivot needs to be found.
+                obj_count = broker.get_info()['object_count']
+                if obj_count > SHARD_CONTAINER_SIZE:
+                    self._find_pivot_point(broker)
 
         # wipe out the cache do disable bypass in delete_db
         cleanups = self.shard_cleanups
@@ -701,77 +653,199 @@ class ContainerSharder(ContainerReplicator):
         #        self.containers_running_time, self.max_containers_per_second)
         #return reported
 
-    def _split_container(self, broker, candidate):
-        root_account, root_container = \
-            ContainerSharder.get_shard_root_path(broker)
-        is_root = root_container == broker.container
-        dist_error = not is_root
-        trie, _misplaced = broker.build_shard_trie(
-            broker.storage_policy_index, prefix=candidate,
-            dist_error=dist_error)
+    def _send_request(self, ip, port, contdevice, partition, op, path,
+                      headers_out={}):
+            if 'user-agent' not in headers_out:
+                headers_out['user-agent'] = 'container-sharder %s' % \
+                                            os.getpid()
+            try:
+                with ConnectionTimeout(self.conn_timeout):
+                        conn = http_connect(ip, port, contdevice, partition,
+                                            op, path, headers_out)
+                with Timeout(self.node_timeout):
+                    response = conn.getresponse()
+                    return response
+            except (Exception, Timeout):
+                # Need to do something here.
+                return None
 
-        node = trie[candidate]
-        if node.flag == DISTRIBUTED_BRANCH:
-            self.logger.warning(_('Best candidate for a shard trie '
-                                  'starts with a distributed node, '
-                                  'something is screwy'))
+    def _find_pivot_point(self, broker):
+        self.logger.info(_('Started searching for best pivot point for %s/%s'),
+                         broker.account, broker.container)
+
+        path = "/%s/%s" % (broker.account, broker.container)
+        part, nodes = self.ring.get_nodes(broker.account, broker.container)
+        nodes = [d for d in nodes if d['ip'] not in self.ips]
+        obj_count = broker.get_info()['object_count']
+        found_pivot = broker.get_info()['pivot_point']
+
+        # Send out requests to get suggested pivots and object counts.
+        for node in nodes:
+            self.cpool.spawn_n(
+                self._send_request, node['ip'], node['port'], node['device'],
+                part, 'HEAD', path)
+
+        successes = 1
+        for resp in self.cpool:
+            if not is_success(resp.status):
+                continue
+            successes += 1
+            if resp.headers['X-Container-Object-Count'] > obj_count:
+                obj_count = resp.headers['X-Container-Object-Count']
+                found_pivot = resp.headers['X-Backend-Pivot-Point']
+
+        quorum = self.ring.replica_count / 2 + 1
+        if successes < quorum:
+            self.logger.info(_('Failed to reach quorum on a pivot point for '
+                               '%s/%s'), broker.account, broker.container)
+        else:
+            # Found a pivot point, so lets update all the other containers
+            headers = {'X-Container-Sysmeta-Shard-Pivot': found_pivot}
+            for node in nodes:
+                self.cpool.spawn_n(
+                    self._send_request, node['ip'], node['port'],
+                    node['device'], part, 'POST', path, headers)
+
+            broker.update_metadata({
+                'X-Container-Sysmeta-Shard-Pivot':
+                    (found_pivot, Timestamp(time.time()).internal)})
+
+            successes = 1
+            for resp in self.cpool:
+                if is_success(resp.status):
+                    successes += 1
+
+            if successes < quorum:
+                self.logger.info(_('Failed to set %s as the pivot point for '
+                                   '%s/%s on remote servers'),
+                                 found_pivot, broker.account, broker.container)
+                return
+
+        self.logger.info(_('Best pivot point for %s/%s is %s'),
+                         broker.account, broker.container, found_pivot)
+
+    def _shard_on_pivot(self, pivot, broker, root_account, root_contianer):
+        self.logger.info(_('Asking for quorum on a pivot point %s for '
+                           '%s/%s'), pivot, broker.account, broker.container)
+        # Before we go and split the tree, lets confirm the rest of the
+        # containers have a quorum
+        quorum = self.ring.replica_count / 2 + 1
+        path = "/%s/%s" % (broker.account, broker.container)
+        part, nodes = self.ring.get_nodes(broker.account, broker.container)
+        nodes = [d for d in nodes if d['ip'] not in self.ips]
+
+        # Send out requests to get suggested pivots and object counts.
+        for node in nodes:
+            self.cpool.spawn_n(
+                self._send_request, node['ip'], node['port'], node['device'],
+                part, 'HEAD', path)
+
+        successes = 1
+        for resp in self.cpool:
+            if not is_success(resp.status):
+                continue
+            if resp.headers['X-Backend-Pivot-Point'] == pivot:
+                successes += 1
+
+        if successes < quorum:
+            self.logger.info(_('Failed to reach quorum on a pivot point for '
+                               '%s/%s'), broker.account, broker.container)
             return
-        self.logger.info(_('sharding at container %s on prefix %s'),
-                         broker.container, candidate)
+        else:
+            self.logger.info(_('Reached quorum on a pivot point %s for '
+                               '%s/%s'), pivot, broker.account,
+                             broker.container)
 
-        marker = ''
-        if trie.metadata['data_node_count'] == \
-                CONTAINER_LISTING_LIMIT:
-            marker = trie.get_last_node()
+        # Now that we have quorum we can split.
+        self.logger.info(_('sharding at from container %s on pivot %s'),
+                         broker.container, pivot)
 
-        split_trie = trie.split_trie(candidate)
+        new_acct, new_left_cont = pivot_to_pivot_container(
+            root_account, root_contianer, pivot, -1)
+        new_acct, new_right_cont = pivot_to_pivot_container(
+            root_account, root_contianer, pivot, 1)
 
-        try:
-            part, new_broker, node_id = \
-                self._get_and_fill_shard_broker(
-                    split_trie.root_key, split_trie, root_account,
-                    root_container, broker.storage_policy_index)
-        except DeviceUnavailable as duex:
-            self.logger.warning(_(str(duex)))
-            return
-
-        # there might be more then CONTAINER_LISTING_LIMIT items in the
-        # new shard, if so add all the objects to the shard database.
-        def add_other_nodes(marker, broker_to_update, delete=False,
-                            timestamp=None, filter_dist=False):
-            while marker:
-                tmp_trie = broker.build_shard_trie(
-                    broker.storage_policy_index, marker=marker,
-                    prefix=candidate)
-
-                objects = self._generate_object_list(
-                    tmp_trie, broker.storage_policy_index, delete,
-                    timestamp, filter_dist)
-                broker_to_update.merge_items(objects)
-                if tmp_trie.metadata['data_node_count'] == \
-                        CONTAINER_LISTING_LIMIT:
-                    marker = tmp_trie.get_last_node()
-                else:
-                    marker = ''
-
-        add_other_nodes(marker, new_broker)
         # Make sure the account exists by running a container PUT
         try:
             policy = POLICIES.get_by_index(broker.storage_policy_index)
             headers = {'X-Storage-Policy': policy.name}
-            self.swift.create_container(new_broker.account,
-                                        new_broker.container,
+            self.swift.create_container(new_acct, new_left_cont,
                                         headers=headers)
         except internal_client.UnexpectedResponse as ex:
             self.logger.warning(_('Failed to put container: %s'),
                                 str(ex))
 
-        self.logger.info(_('Replicating new shard container %s/%s'),
-                         new_broker.account, new_broker.container)
-        self.cpool.spawn_n(
-            self._replicate_object, part, new_broker.db_file, node_id)
-        self.cpool.waitall()
+        policy_index = broker.storage_policy_index
+        query = dict(marker='', end_marker='', prefix='', delimiter='',
+                     storage_policy_index=policy_index)
 
+        # there might be more then CONTAINER_LISTING_LIMIT items in the
+        # new shard, if so add all the objects to the shard database.
+        def add_other_nodes(marker, broker_to_update, qry):
+            timestamp = Timestamp(time.time()).internal
+            while marker:
+                qry['marker'] = marker
+                new_items = broker.list_objects_iter(
+                    CONTAINER_LISTING_LIMIT, **qry)
+
+                # Add new items
+                objects = self._generate_object_list(
+                    new_items, broker.storage_policy_index)
+                broker_to_update.merge_items(objects)
+
+                # Delete existing (while we have the same view of the items)
+                delete_objs = self._generate_object_list(
+                    new_items, broker.storage_policy_index, delete=True,
+                    timestamp=timestamp)
+                broker.merge_items(delete_objs)
+
+                if len(new_items) == CONTAINER_LISTING_LIMIT:
+                    marker = new_items[-1][0]
+                else:
+                    marker = ''
+
+        timestamp = Timestamp(time.time()).internal
+        for new_cont, weight in ((new_left_cont, -1), (new_right_cont, 1)):
+            q = {}
+            if weight < 0:
+                q = query.copy().update({'end_marker': pivot,
+                                         'include_end_marker': True})
+            else:
+                q = query.copy().update({'marker': pivot})
+            items = broker.list_objects_iter(CONTAINER_LISTING_LIMIT, **q)
+            if len(items) == CONTAINER_LISTING_LIMIT:
+                marker = items[-1][0]
+            else:
+                marker = ''
+
+            try:
+                part, new_broker, node_id = \
+                    self._get_and_fill_shard_broker(
+                        pivot, weight, items, root_account, root_contianer,
+                        policy_index)
+
+                # Delete the same items from current broker (while we have the
+                # same state)
+                delete_objs = self._generate_object_list(items, policy_index,
+                                                         delete=True,
+                                                         timestamp=timestamp)
+                broker.merge_items(delete_objs)
+            except DeviceUnavailable as duex:
+                self.logger.warning(_(str(duex)))
+                return
+
+            add_other_nodes(marker, new_broker, q)
+
+            self.logger.info(_('Replicating new shard container %s/%s'),
+                             new_broker.account, new_broker.container)
+            self.cpool.spawn_n(
+                self._replicate_object, part, new_broker.db_file, node_id)
+            self.cpool.waitall()
+
+
+        # TODO Clean up is now apart of splitting (above) we need to add the
+        # pivot points to parent and root, need to deal with levels and order
+        # first.
         self.logger.info(_('Cleaning up sharded objects of old '
                            'container %s/%s'), broker.account,
                          broker.container)
@@ -801,7 +875,7 @@ class ContainerSharder(ContainerReplicator):
         if not is_root:
             # Push the new distributed node to the root container,
             # we do this so we can short circuit PUTs.
-            self._push_dist_node_to_container('', root_account, root_container,
+            self._push_pivot_point_to_container('', root_account, root_container,
                                               dist_trie,
                                               broker.storage_policy_index)
 
@@ -811,13 +885,13 @@ class ContainerSharder(ContainerReplicator):
                          new_broker.account, new_broker.container,
                          split_trie.root_key)
 
-    def _push_dist_node_to_container(self, prefix, root_account,
+    def _push_pivot_point_to_container(self, pivot, weight, root_account,
                                      root_container, objs_or_trie,
                                      storage_policy_index):
         # Push the new distributed node to the container.
         part, root_broker, node_id = \
             self._get_and_fill_shard_broker(
-                prefix, objs_or_trie, root_account, root_container,
+                pivot, weight, objs_or_trie, root_account, root_container,
                 storage_policy_index)
         self.cpool.spawn_n(
             self._replicate_object, part, root_broker.db_file, node_id)
@@ -834,7 +908,7 @@ class ContainerSharder(ContainerReplicator):
         prefix = '' if prefix is None else prefix[0]
 
         # Find the parent node, start by getting the root container's trie
-        trie = self._get_shard_trie(root_account, root_container, newest=True)
+        trie = self._get_pivot_tree(root_account, root_container, newest=True)
         parent_prefix = None
         try:
             node = trie.get_node(prefix)
@@ -915,7 +989,7 @@ class ContainerSharder(ContainerReplicator):
 
         # Root container also..
         self.logger.info(_("Updating root container '%s'"), root_container)
-        self._push_dist_node_to_container('', root_account, root_container,
+        self._push_pivot_point_to_container('', root_account, root_container,
                                           trie, broker.storage_policy_index)
 
         # Now replicate the parent node, so the changes are pushed.

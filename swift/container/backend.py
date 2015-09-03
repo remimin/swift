@@ -595,7 +595,8 @@ class ContainerBroker(DatabaseBroker):
             conn.commit()
 
     def list_objects_iter(self, limit, marker, end_marker, prefix, delimiter,
-                          path=None, storage_policy_index=0):
+                          path=None, storage_policy_index=0,
+                          include_end_marker=False):
         """
         Get a list of objects sorted by name starting at marker onward, up
         to limit entries.  Entries will begin with the prefix and will not
@@ -608,6 +609,7 @@ class ContainerBroker(DatabaseBroker):
         :param delimiter: delimiter for query
         :param path: if defined, will set the prefix and delimiter based on
                      the path
+        :param include_end_marker: Include the item at end_marker in results
 
         :returns: list of tuples of (name, created_at, size, content_type,
                   etag)
@@ -631,7 +633,10 @@ class ContainerBroker(DatabaseBroker):
                            FROM object WHERE'''
                 query_args = []
                 if end_marker:
-                    query += ' name < ? AND'
+                    if include_end_marker:
+                        query += ' name <= ? AND'
+                    else:
+                        query += ' name < ? AND'
                     query_args.append(end_marker)
                 if delim_force_gte:
                     query += ' name >= ? AND'

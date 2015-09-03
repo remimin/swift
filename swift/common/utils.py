@@ -3695,6 +3695,45 @@ class PivotTree(object):
         for leaf in self._root.leaves_iter():
             yield leaf
 
+    def get_pivot_bounds(self, pivot):
+        """
+        Returns the bounds that should be stored in the specified pivot.
+
+        Returns a Tuple of pivots that represent the bounds (>, <):
+
+          get_pivot_bounds('i')
+          ('f', 'l')
+
+        That is to say, anything > 'f' and < 'l'
+
+        :rtype : object
+        """
+        pivot, weight = self.get(pivot)
+        gt = lt = None
+
+        # Now to find the boundaries, visiting the parent will give us one of
+        # the two, depending on what side of the parent this pivot lives.
+        if pivot.key > pivot.parent.key:
+            gt = pivot.parent.key
+        else:
+            lt = pivot.parent.key
+
+        # Now we need to find other, this will be whenever the side of the
+        # pivot changes or till we hit the root.
+        node = pivot.parent
+        while not gt or not lt:
+            if node.parent == None:
+                # At root, so if we haven't found the corresponding boundary
+                # then there isn't one.
+                break
+            if node.key > node.parent.key and not gt:
+                gt = node.parent.key
+            elif node.key < node.parent.key and not lt:
+                lt = node.parent.key
+            node = node.parent
+
+        return gt, lt
+
 class PivotNode(object):
     def __init__(self, key, timestamp=None, parent=None):
         self._key = key
@@ -3840,3 +3879,13 @@ def pivot_to_pivot_container(account, container, pivot_point, weight):
         acc = ".sharded_%s" % account
         cont = "%s%s%s" % (container, weight_to_str[weight], pivot_point)
         return acc, cont
+
+def pivot_container_to_pivot(root_container, container):
+    pivot = container[len(root_container) + 2:]
+    weight = container[len(root_container):len(container) + 2]
+    if weight.startswith('<-'):
+        weight = -1
+    else:
+        weight = 1
+
+    return pivot, weight
