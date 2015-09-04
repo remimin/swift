@@ -3691,6 +3691,10 @@ class PivotTree(object):
     def __getitem__(self, item):
         return self.get(item)
 
+    def get_level(self, key):
+        node, _weight = self.get(key)
+        return node.level
+
     def leaves_iter(self):
         for leaf in self._root.leaves_iter():
             yield leaf
@@ -3741,6 +3745,7 @@ class PivotNode(object):
         self._timestamp = timestamp if timestamp else \
             Timestamp(time.time()).internal
         self._left = self._right = None
+        self._level = parent.level + 1 if parent else 0
 
     @property
     def key(self):
@@ -3781,6 +3786,10 @@ class PivotNode(object):
     @right.setter
     def right(self, right):
         self._right = right
+
+    @property
+    def level(self):
+        return self._level
 
     def __iter__(self):
         yield self
@@ -3875,6 +3884,8 @@ def pivot_to_pivot_container(account, container, pivot_point, weight):
         :return: A tuple of (account, container) representing the sharded
                  container.
         """
+        if not pivot_point and not weight:
+            return account, container
         weight_to_str = {-1: '<-', 0: '<-', 1: '->'}
         acc = ".sharded_%s" % account
         cont = "%s%s%s" % (container, weight_to_str[weight], pivot_point)

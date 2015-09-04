@@ -261,6 +261,7 @@ class ContainerBroker(DatabaseBroker):
                 CREATE TABLE pivot_points (
                     ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT,
+                    level INTEGER,
                     created_at TEXT,
                     deleted INTEGER DEFAULT 0
                 );
@@ -802,10 +803,13 @@ class ContainerBroker(DatabaseBroker):
                          rec['storage_policy_index'])
                          for rec in to_add.itervalues()))
                 else:
+                    # Note: 'size' is storing the level.
                     curs.executemany(
-                        'INSERT INTO pivot_points (name, created_at, deleted)'
+                        'INSERT INTO pivot_points (name, created_at, level, '
+                        'deleted)'
                         'VALUES (?, ?, ?)',
-                        ((rec['name'], rec['created_at'], rec['deleted'])
+                        ((rec['name'], rec['created_at'], rec['size'],
+                          rec['deleted'])
                          for rec in to_add.itervalues()))
 
         def _really_merge_items(conn):
@@ -991,10 +995,10 @@ class ContainerBroker(DatabaseBroker):
         with self.get() as conn:
             try:
                 data = conn.execute('''
-                    SELECT name, created_at
+                    SELECT name, created_at, level
                     FROM pivot_points
                     WHERE deleted=0
-                    ORDER BY name;
+                    ORDER BY level;
                     ''')
             except sqlite3.OperationalError as err:
                 if 'no such table: pivot_points' in str(err):
@@ -1009,7 +1013,7 @@ class ContainerBroker(DatabaseBroker):
                 obj = {
                     'name': item[0],
                     'created_at': item[1],
-                    'size': 0,
+                    'size': item[2], # <- Storing the level in size.
                     'content_type': '',
                     'etag': '',
                     'deleted': item[3] if len(item) > 3 else 0,
