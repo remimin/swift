@@ -994,12 +994,12 @@ class ContainerBroker(DatabaseBroker):
         self._commit_puts_stale_ok()
         with self.get() as conn:
             try:
-                data = conn.execute('''
+                data = list(conn.execute('''
                     SELECT name, created_at, level
                     FROM pivot_points
                     WHERE deleted=0
                     ORDER BY level;
-                    ''')
+                    '''))
             except sqlite3.OperationalError as err:
                 if 'no such table: pivot_points' in str(err):
                     self.create_pivot_points_table(conn)

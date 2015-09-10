@@ -28,7 +28,6 @@ from swift.common.storage_policy import POLICIES
 from swift.common.swob import HTTPBadRequest, HTTPForbidden, \
     HTTPNotFound
 
-
 class ContainerController(Controller):
     """WSGI controller for container requests"""
     server_type = 'Container'
@@ -36,7 +35,7 @@ class ContainerController(Controller):
     # Ensure these are all lowercase
     pass_through_headers = ['x-container-read', 'x-container-write',
                             'x-container-sync-key', 'x-container-sync-to',
-                            'x-versions-location']
+                            'x-versions-location', 'x-container-sharding']
 
     def __init__(self, app, account_name, container_name, **kwargs):
         Controller.__init__(self, app)
@@ -160,10 +159,6 @@ class ContainerController(Controller):
                 resp.body = 'Reached container limit of %s' % \
                     self.app.max_containers_per_account
                 return resp
-        if req.headers.get('X-Container-Sharding'):
-            sysmeta_header = get_sys_meta_prefix('container') + 'sharding'
-            req.headers[sysmeta_header] = config_true_value(
-                req.headers.get('X-Container-Sharding'))
         container_partition, containers = self.app.container_ring.get_nodes(
             self.account_name, self.container_name)
         headers = self._backend_requests(req, len(containers),
@@ -191,10 +186,6 @@ class ContainerController(Controller):
             self.account_info(self.account_name, req)
         if not accounts:
             return HTTPNotFound(request=req)
-        if req.headers.get('X-Container-Sharding'):
-            sysmeta_header = get_sys_meta_prefix('container') + 'sharding'
-            req.headers[sysmeta_header] = config_true_value(
-                req.headers.get('X-Container-Sharding'))
         container_partition, containers = self.app.container_ring.get_nodes(
             self.account_name, self.container_name)
         headers = self.generate_request_headers(req, transfer=True)
