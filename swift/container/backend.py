@@ -1048,8 +1048,8 @@ class ContainerBroker(DatabaseBroker):
                     SELECT name
                     FROM object
                     WHERE deleted=0 LIMIT 1 OFFSET (
-                        SELECT reported_object_count / 2
-                        FROM container_info);
+                        SELECT object_count / 2
+                        FROM policy_stat);
                     ''')
                 if data:
                     data = data.fetchone()

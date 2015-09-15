@@ -15,14 +15,13 @@
 
 import errno
 import json
-import math
 import os
 import time
 import re
 from swift import gettext_ as _
 from random import random
 
-from eventlet import Timeout, GreenPool
+from eventlet import Timeout
 
 from swift.container.replicator import ContainerReplicator
 from swift.container.backend import ContainerBroker, DATADIR, \
@@ -32,14 +31,13 @@ from swift.common.bufferedhttp import http_connect
 from swift.common.db import DatabaseAlreadyExists
 from swift.common.exceptions import DeviceUnavailable, ConnectionTimeout
 from swift.common.http import is_success
-from swift.common.request_helpers import get_container_shard_path
 from swift.common.constraints import CONTAINER_LISTING_LIMIT, \
     SHARD_CONTAINER_SIZE
 from swift.common.ring.utils import is_local_device
 from swift.common.utils import get_logger, audit_location_generator, \
     config_true_value, dump_recon_cache, whataremyips, hash_path, \
     storage_directory, Timestamp, PivotTree, pivot_to_pivot_container, \
-    pivot_container_to_pivot
+    pivot_container_to_pivot, GreenAsyncPile
 from swift.common.wsgi import ConfigString
 from swift.common.storage_policy import POLICIES
 
@@ -116,12 +114,14 @@ class ContainerSharder(ContainerReplicator):
         self.root = conf.get('devices', '/srv/node')
         self.vm_test_mode = config_true_value(conf.get('vm_test_mode', 'no'))
         concurrency = int(conf.get('concurrency', 8))
-        self.cpool = GreenPool(size=concurrency)
+        self.cpool = GreenAsyncPile(concurrency)
 
         self.node_timeout = int(conf.get('node_timeout', 10))
         self.reclaim_age = float(conf.get('reclaim_age', 86400 * 7))
         self.extract_device_re = re.compile('%s%s([^%s]+)' % (
             self.root, os.path.sep, os.path.sep))
+        self.shard_container_size = int(conf.get('shard_container_size',
+                                                 SHARD_CONTAINER_SIZE))
 
         # internal client
         self.conn_timeout = float(conf.get('conn_timeout', 5))
@@ -183,9 +183,9 @@ class ContainerSharder(ContainerReplicator):
             return None
         tree = PivotTree()
         try:
-            for pivot in json.load(resp.body):
+            for pivot in json.loads(resp.body):
                 tree.add(pivot)
-        except ValueError as ex:
+        except ValueError:
             # Failed to decode the json response
             return None
         return tree
@@ -332,9 +332,13 @@ class ContainerSharder(ContainerReplicator):
             # is misplaced.
             if broker.get_info()['object_count'] > 0:
                 queries.append(query.copy())
+        elif pivot is None:
+            # This is an unsharded root container, so we don't need to
+            # query anything.
+            return
         else:
-            # it hasn't been sharded, so we need to look for objects that
-            # shouldn't be in the object table.
+            # it hasn't been sharded and isn't the root container, so we need
+            # to look for objects that shouldn't be in the object table.
             # First lets get the bounds of the pivot, for this we need
             # the entire pivot tree.
             tree = self._get_pivot_tree(root_account, root_container,
@@ -387,7 +391,7 @@ class ContainerSharder(ContainerReplicator):
                     p_and_w[0], p_and_w[1], obj_list, root_account,
                     root_container, policy_index)
 
-                self.cpool.spawn_n(
+                self.cpool.spawn(
                     self._replicate_object, part, new_broker.db_file, node_id)
 
                 # Remove the now relocated misplaced items.
@@ -395,7 +399,7 @@ class ContainerSharder(ContainerReplicator):
                                                    delete=True,
                                                    timestamp=timestamp)
                 broker.merge_items(items)
-            self.cpool.waitall()
+            any(self.cpool)
 
             if len(objs) == CONTAINER_LISTING_LIMIT:
                 # There could be more, so recurse my pretty
@@ -410,8 +414,8 @@ class ContainerSharder(ContainerReplicator):
         self.logger.info('Cleaning up %d replicated shard containers',
                          len(cleanups))
         for container in cleanups.values():
-            self.cpool.spawn_n(self.delete_db, container)
-        self.cpool.waitall()
+            self.cpool.spawn(self.delete_db, container)
+        any(self.cpool)
         self.logger.info('Finished misplaced shard replication')
 
     @staticmethod
@@ -482,7 +486,7 @@ class ContainerSharder(ContainerReplicator):
             root_ok = True
             # the node exists so now we need to find the parent (if there
             # is one)
-            if node.parent == None:
+            if node.parent is None:
                 # Parent is root
                 parent_ok = True
                 parent_tree = tree
@@ -617,14 +621,14 @@ class ContainerSharder(ContainerReplicator):
             new_pivot = broker.metadata.get('X-Container-Sysmeta-Shard-Pivot')
             new_pivot = '' if new_pivot is None else new_pivot[0]
 
-            if pivot:
+            if new_pivot:
                 # We need to shard on the pivot point
                 self._shard_on_pivot(new_pivot, broker, root_account,
                                      root_container)
             else:
                 # No pivot, so check to see if a pivot needs to be found.
                 obj_count = broker.get_info()['object_count']
-                if obj_count > SHARD_CONTAINER_SIZE:
+                if obj_count > self.shard_container_size:
                     self._find_pivot_point(broker)
 
         # wipe out the cache do disable bypass in delete_db
@@ -634,8 +638,10 @@ class ContainerSharder(ContainerReplicator):
                          len(cleanups))
 
         for container in cleanups.values():
-            self.cpool.spawn_n(self.delete_db, container)
-        self.cpool.waitall()
+            self.cpool.spawn(self.delete_db, container)
+
+        # Now we wait for all threads to finish.
+        any(self.cpool)
 
         self.logger.info(_('Finished container sharding pass'))
 
@@ -668,6 +674,8 @@ class ContainerSharder(ContainerReplicator):
             if 'user-agent' not in headers_out:
                 headers_out['user-agent'] = 'container-sharder %s' % \
                                             os.getpid()
+            if 'X-Timestamp' not in headers_out:
+                headers_out['X-Timestamp'] = Timestamp(time.time()).normal
             try:
                 with ConnectionTimeout(self.conn_timeout):
                         conn = http_connect(ip, port, contdevice, partition,
@@ -675,7 +683,8 @@ class ContainerSharder(ContainerReplicator):
                 with Timeout(self.node_timeout):
                     response = conn.getresponse()
                     return response
-            except (Exception, Timeout):
+            except (Exception, Timeout) as x:
+                self.logger.info(str(x))
                 # Need to do something here.
                 return None
 
@@ -685,13 +694,15 @@ class ContainerSharder(ContainerReplicator):
 
         path = "/%s/%s" % (broker.account, broker.container)
         part, nodes = self.ring.get_nodes(broker.account, broker.container)
-        nodes = [d for d in nodes if d['ip'] not in self.ips]
+        nodes = [d for d in nodes
+                 if d['ip'] not in self.ips or
+                 d['port'] != self.port]
         obj_count = broker.get_info()['object_count']
         found_pivot = broker.get_info()['pivot_point']
 
         # Send out requests to get suggested pivots and object counts.
         for node in nodes:
-            self.cpool.spawn_n(
+            self.cpool.spawn(
                 self._send_request, node['ip'], node['port'], node['device'],
                 part, 'HEAD', path)
 
@@ -700,19 +711,22 @@ class ContainerSharder(ContainerReplicator):
             if not is_success(resp.status):
                 continue
             successes += 1
-            if resp.headers['X-Container-Object-Count'] > obj_count:
-                obj_count = resp.headers['X-Container-Object-Count']
-                found_pivot = resp.headers['X-Backend-Pivot-Point']
+            headers = resp.getheaders()
+            if resp.getheader('X-Container-Object-Count') > obj_count:
+                obj_count = resp.getheader('X-Container-Object-Count')
+                found_pivot = resp.getheader('X-Backend-Pivot-Point')
 
         quorum = self.ring.replica_count / 2 + 1
         if successes < quorum:
             self.logger.info(_('Failed to reach quorum on a pivot point for '
                                '%s/%s'), broker.account, broker.container)
+            return
         else:
             # Found a pivot point, so lets update all the other containers
+            self.logger.info('path: %s', path)
             headers = {'X-Container-Sysmeta-Shard-Pivot': found_pivot}
             for node in nodes:
-                self.cpool.spawn_n(
+                self.cpool.spawn(
                     self._send_request, node['ip'], node['port'],
                     node['device'], part, 'POST', path, headers)
 
@@ -724,7 +738,7 @@ class ContainerSharder(ContainerReplicator):
             for resp in self.cpool:
                 if is_success(resp.status):
                     successes += 1
-
+            self.logger.info('successses = %d', successes)
             if successes < quorum:
                 self.logger.info(_('Failed to set %s as the pivot point for '
                                    '%s/%s on remote servers'),
@@ -747,7 +761,7 @@ class ContainerSharder(ContainerReplicator):
 
         # Send out requests to get suggested pivots and object counts.
         for node in nodes:
-            self.cpool.spawn_n(
+            self.cpool.spawn(
                 self._send_request, node['ip'], node['port'], node['device'],
                 part, 'HEAD', path)
 
@@ -849,10 +863,9 @@ class ContainerSharder(ContainerReplicator):
 
             self.logger.info(_('Replicating new shard container %s/%s'),
                              new_broker.account, new_broker.container)
-            self.cpool.spawn_n(
+            self.cpool.spawn(
                 self._replicate_object, part, new_broker.db_file, node_id)
-            self.cpool.waitall()
-
+            any(self.cpool)
 
         # pivot points to parent and root, but first we need the pivot tree
         # from the root container
@@ -884,16 +897,16 @@ class ContainerSharder(ContainerReplicator):
                          pivot)
 
     def _push_pivot_point_to_container(self, pivot, weight, root_account,
-                                     root_container, pivot_point,
-                                     storage_policy_index):
+                                       root_container, pivot_point,
+                                       storage_policy_index):
         # Push the new distributed node to the container.
         part, root_broker, node_id = \
             self._get_and_fill_shard_broker(
                 pivot, weight, pivot_point, root_account, root_container,
                 storage_policy_index)
-        self.cpool.spawn_n(
+        self.cpool.spawn(
             self._replicate_object, part, root_broker.db_file, node_id)
-        self.cpool.waitall()
+        any(self.cpool)
 
     def run_forever(self, *args, **kwargs):
         """Run the container sharder until stopped."""

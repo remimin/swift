@@ -3715,6 +3715,10 @@ class PivotTree(object):
         pivot, weight = self.get(pivot)
         gt = lt = None
 
+        if pivot is None:
+            # Empty pivot tree, return with (None, None)
+            return None, None
+
         # Now to find the boundaries, visiting the parent will give us one of
         # the two, depending on what side of the parent this pivot lives.
         if pivot.key > pivot.parent.key:
@@ -3868,6 +3872,7 @@ class PivotNode(object):
     def __getitem__(self, item):
         return self.get(item)
 
+
 def pivot_to_pivot_container(account, container, pivot_point, weight):
         """
         Using a specified pivot_point and weight, generate the required sharded
@@ -3891,7 +3896,10 @@ def pivot_to_pivot_container(account, container, pivot_point, weight):
         cont = "%s%s%s" % (container, weight_to_str[weight], pivot_point)
         return acc, cont
 
+
 def pivot_container_to_pivot(root_container, container):
+    if root_container == container:
+        return None, None
     pivot = container[len(root_container) + 2:]
     weight = container[len(root_container):len(container) + 2]
     if weight.startswith('<-'):
