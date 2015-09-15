@@ -33,7 +33,7 @@ from swift.common.storage_policy import split_policy_string, PolicyError
 from swift.obj.diskfile import get_tmp_dir, ASYNCDIR_BASE
 from swift.common.http import is_success, HTTP_NOT_FOUND, \
     HTTP_INTERNAL_SERVER_ERROR, HTTP_MOVED_PERMANENTLY
-from swift.common.swob import HTTPMovedPermanently
+from swift.common.swob import HTTPMovedPermanently, HTTPException
 
 
 class ObjectUpdater(Daemon):
@@ -220,7 +220,7 @@ class ObjectUpdater(Daemon):
             event_success, node_id, redirect = self.object_update(
                 nodes[0], part, op, object, headers_out)
             if redirect:
-                raise redirect
+                raise HTTPMovedPermanently(headers=dict(redirect.getheaders()))
             results.append((event_success, node_id))
 
             # In case the number of container replicas is 1.
@@ -231,9 +231,10 @@ class ObjectUpdater(Daemon):
                 for event in events:
                     event_success, node_id, redirect = event.wait()
                     if redirect:
-                        raise redirect
+                        raise HTTPMovedPermanently(
+                            headers=dict(redirect.getheaders()))
                     results.append((event_success, node_id))
-        except HTTPMovedPermanently as ex:
+        except (HTTPMovedPermanently, HTTPException) as ex:
             piv_acc = ex.headers.get('X-Backend-Pivot-Account')
             piv_cont = ex.headers.get('X-Backend-Pivot-Container')
             if not piv_acc or not piv_cont:
@@ -320,7 +321,7 @@ class ObjectUpdater(Daemon):
                 resp.read()
                 success = (is_success(resp.status) or
                            resp.status == HTTP_NOT_FOUND)
-                if resp.status_int == HTTP_MOVED_PERMANENTLY:
+                if resp.status == HTTP_MOVED_PERMANENTLY:
                     return success, node['id'], resp
                 return success, node['id'], None
         except (Exception, Timeout):

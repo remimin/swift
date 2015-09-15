@@ -376,10 +376,8 @@ class ContainerController(BaseStorageServer):
                         account, container, node.key, weight)
 
                     part, nodes = self.ring.get_nodes(piv_acc, piv_cont)
-                    node_data = list()
-                    item_getter = itemgetter('ip', 'device')
-                    for node in nodes:
-                        node_data.append(item_getter(node))
+                    node_data = [('%s:%d' % (n['ip'], n['port']), n['device'])
+                                 for n in nodes]
                     hosts, devices = zip(*node_data)
                     headers = {'X-Backend-Pivot-Account': piv_acc,
                                'X-Backend-Pivot-Container': piv_cont,

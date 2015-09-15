@@ -122,6 +122,8 @@ class ContainerSharder(ContainerReplicator):
             self.root, os.path.sep, os.path.sep))
         self.shard_container_size = int(conf.get('shard_container_size',
                                                  SHARD_CONTAINER_SIZE))
+        self.rsync_compress = config_true_value(
+            conf.get('rsync_compress', 'no'))
 
         # internal client
         self.conn_timeout = float(conf.get('conn_timeout', 5))
@@ -738,7 +740,6 @@ class ContainerSharder(ContainerReplicator):
             for resp in self.cpool:
                 if is_success(resp.status):
                     successes += 1
-            self.logger.info('successses = %d', successes)
             if successes < quorum:
                 self.logger.info(_('Failed to set %s as the pivot point for '
                                    '%s/%s on remote servers'),
@@ -757,7 +758,9 @@ class ContainerSharder(ContainerReplicator):
         quorum = self.ring.replica_count / 2 + 1
         path = "/%s/%s" % (broker.account, broker.container)
         part, nodes = self.ring.get_nodes(broker.account, broker.container)
-        nodes = [d for d in nodes if d['ip'] not in self.ips]
+        nodes = [d for d in nodes
+                 if d['ip'] not in self.ips or
+                 d['port'] != self.port]
 
         # Send out requests to get suggested pivots and object counts.
         for node in nodes:
@@ -769,7 +772,7 @@ class ContainerSharder(ContainerReplicator):
         for resp in self.cpool:
             if not is_success(resp.status):
                 continue
-            if resp.headers['X-Backend-Pivot-Point'] == pivot:
+            if resp.getheader('X-Backend-Pivot-Point') == pivot:
                 successes += 1
 
         if successes < quorum:
@@ -831,12 +834,12 @@ class ContainerSharder(ContainerReplicator):
 
         timestamp = Timestamp(time.time()).internal
         for new_cont, weight in ((new_left_cont, -1), (new_right_cont, 1)):
-            q = {}
+            q = query.copy()
             if weight < 0:
-                q = query.copy().update({'end_marker': pivot,
-                                         'include_end_marker': True})
+                q.update({'end_marker': pivot,
+                          'include_end_marker': True})
             else:
-                q = query.copy().update({'marker': pivot})
+                q.update({'marker': pivot})
             items = broker.list_objects_iter(CONTAINER_LISTING_LIMIT, **q)
             if len(items) == CONTAINER_LISTING_LIMIT:
                 marker = items[-1][0]

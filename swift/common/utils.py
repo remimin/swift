@@ -3891,7 +3891,7 @@ def pivot_to_pivot_container(account, container, pivot_point, weight):
         """
         if not pivot_point and not weight:
             return account, container
-        weight_to_str = {-1: '<-', 0: '<-', 1: '->'}
+        weight_to_str = {-1: '.le.', 0: '.le.', 1: '.gt.'}
         acc = ".sharded_%s" % account
         cont = "%s%s%s" % (container, weight_to_str[weight], pivot_point)
         return acc, cont
@@ -3902,7 +3902,7 @@ def pivot_container_to_pivot(root_container, container):
         return None, None
     pivot = container[len(root_container) + 2:]
     weight = container[len(root_container):len(container) + 2]
-    if weight.startswith('<-'):
+    if weight.startswith('.le.'):
         weight = -1
     else:
         weight = 1

@@ -807,7 +807,7 @@ class ContainerBroker(DatabaseBroker):
                     curs.executemany(
                         'INSERT INTO pivot_points (name, created_at, level, '
                         'deleted)'
-                        'VALUES (?, ?, ?)',
+                        'VALUES (?, ?, ?, ?)',
                         ((rec['name'], rec['created_at'], rec['size'],
                           rec['deleted'])
                          for rec in to_add.itervalues()))

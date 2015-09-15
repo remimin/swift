@@ -236,8 +236,8 @@ class ObjectController(BaseStorageServer):
                     response.read()
                     if is_success(response.status):
                         return
-                    elif response.status_int == HTTP_MOVED_PERMANENTLY and \
-                            response.headers.get('X-Backend-Pivot-Container'):
+                    elif response.status == HTTP_MOVED_PERMANENTLY and \
+                            response.getheader('X-Backend-Pivot-Container'):
                         # We have received a Permanent Move on a sharded
                         # container. Which means we need to redirect
                         return response
@@ -269,8 +269,9 @@ class ObjectController(BaseStorageServer):
                     contdevice, headers_out, objdevice, policy,
                     logger_thread_locals=self.logger.thread_locals)
                 if redirect:
-                    raise redirect
-        except HTTPMovedPermanently as ex:
+                    raise HTTPMovedPermanently(
+                        headers=dict(redirect.getheaders()))
+        except (HTTPMovedPermanently, HTTPException) as ex:
             piv_acc = ex.headers.get('X-Backend-Pivot-Account')
             piv_cont = ex.headers.get('X-Backend-Pivot-Container')
             if not piv_acc or not piv_cont:
