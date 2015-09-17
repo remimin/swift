@@ -21,6 +21,7 @@ from xml.etree.cElementTree import Element, SubElement, tostring
 
 from eventlet import Timeout
 from operator import itemgetter
+from random import shuffle
 
 import swift.common.db
 from swift.container.backend import ContainerBroker, DATADIR
@@ -416,7 +417,6 @@ class ContainerController(BaseStorageServer):
                                              new_container_policy,
                                              requested_policy_index)
             if req.headers.get('X-Container-Sharding'):
-                pdb.set_trace()
                 sharding_sysmeta = get_sys_meta_prefix('container') + 'sharding'
                 req.headers[sharding_sysmeta] = \
                     config_true_value(req.headers['X-Container-Sharding'])
@@ -473,6 +473,8 @@ class ContainerController(BaseStorageServer):
             return HTTPNotFound(request=req, headers=headers)
         self._add_metadata(headers, broker.metadata)
         headers['Content-Type'] = out_content_type
+        if len(broker.get_pivot_points()) > 0:
+            return self.GETorHEAD_sharded(req, broker, headers)
         return HTTPNoContent(request=req, headers=headers, charset='utf-8')
 
     def update_data_record(self, record):
@@ -494,6 +496,80 @@ class ContainerController(BaseStorageServer):
         response['last_modified'] = Timestamp(created).isoformat
         override_bytes_from_content_type(response, logger=self.logger)
         return response
+
+    def GETorHEAD_sharded(self, req, broker, headers, marker='',
+                          end_marker='', prefix='',
+                          limit=constraints.CONTAINER_LISTING_LIMIT):
+
+        def _send_request(node, part, op, path):
+            try:
+                with ConnectionTimeout(self.conn_timeout):
+                    conn = http_connect(
+                        node['ip'], node['port'], node['device'], part, op,
+                        path)
+                with Timeout(self.node_timeout):
+                    resp = conn.getresponse()
+                    return resp
+            except (Exception, Timeout):
+                return None
+
+        # Firstly we need the requested container's, the root container, pivot
+        # tree.
+        tree = broker.build_pivot_tree()
+
+        # Now we need to find out where to start from.
+        start = True
+        if marker or prefix:
+            spiv, sw = tree.get(max(marker, prefix))
+            start = False
+
+        if end_marker:
+            epiv, ew = tree.get(end_marker)
+        end = False
+
+        object_count = 0
+        object_bytes = 0
+        objects = list()
+        for leaf, leaf_weight in tree.leaves_iter():
+            if not start and spiv:
+                if leaf.key == spiv.key and sw == leaf_weight:
+                    start = True
+                else:
+                    continue
+
+            if epiv and leaf.key == epiv.key and ew == leaf_weight:
+                end = True
+
+            piv_acct, piv_cont = pivot_to_pivot_container(
+                broker.account, broker.container, leaf.key, leaf_weight)
+            path = '/%s/%s?format=json&limit=%d' % (piv_acct, piv_cont, limit)
+            part, nodes = self.ring.get_nodes(piv_acct, piv_cont)
+            shuffle(nodes)
+            for node in nodes:
+                resp = _send_request(node, part, req.method, path)
+                if resp and is_success(resp.status):
+                    object_count += \
+                        int(resp.getheader('X-Container-Object-Count')) or 0
+                    object_bytes += \
+                        int(resp.getheader('X-Container-Bytes-Used')) or 0
+                    if req.method == 'GET':
+                        objs = json.load(resp)
+                        if objs:
+                            objects.extend(objs)
+                            limit -= len(objs)
+                        else:
+                            end = True
+            if end:
+                break
+        headers['X-Container-Object-Count'] = object_count
+        headers['X-Container-Bytes-Used'] = object_bytes
+
+        if req.method == 'HEAD':
+            return HTTPNoContent(request=req, headers=headers, charset='utf-8')
+
+        out_content_type = get_listing_content_type(req)
+        return self.create_listing(req, out_content_type, {}, headers,
+                                   broker.metadata, objects, broker.container)
 
     @public
     @timing_stats()
@@ -531,6 +607,10 @@ class ContainerController(BaseStorageServer):
             return HTTPNotFound(request=req, headers=resp_headers)
         if nodes and nodes.lower() == "pivot":
             container_list = broker.get_pivot_points()
+        elif len(broker.get_pivot_points()) > 0:
+            # Sharded container so we need to pass to GETorHEAD_sharded
+            return self.GETorHEAD_sharded(req, broker, resp_headers, marker,
+                                          end_marker, prefix, limit)
         else:
             container_list = broker.list_objects_iter(
                 limit, marker, end_marker, prefix, delimiter, path,

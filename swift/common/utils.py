@@ -3695,8 +3695,8 @@ class PivotTree(object):
         node, _weight = self.get(key)
         return node.level
 
-    def leaves_iter(self):
-        for leaf in self._root.leaves_iter():
+    def leaves_iter(self, reverse=False):
+        for leaf in self._root.leaves_iter(reverse):
             yield leaf
 
     def get_pivot_bounds(self, pivot):
@@ -3802,7 +3802,7 @@ class PivotNode(object):
                 for c in node:
                     yield c
 
-    def leaves_iter(self):
+    def leaves_iter(self, reverse=False):
         """
         A leaf iterator.
 
@@ -3815,10 +3815,14 @@ class PivotNode(object):
           -1: The left side (< node.key)
            1: The right side (> node.key)
 
+        :param reverse: Reverse the iteration of the tree (high -> low)
         """
-        for node, weight in ((self._left, -1), (self._right, 1)):
+        order = [(self._left, -1), (self._right, 1)]
+        if reverse:
+            order.reverse()
+        for node, weight in order:
             if node:
-                for n, w in node.leaves_iter():
+                for n, w in node.leaves_iter(reverse):
                     yield n, w
             else:
                 yield self, weight
