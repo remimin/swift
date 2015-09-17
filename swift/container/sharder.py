@@ -710,13 +710,14 @@ class ContainerSharder(ContainerReplicator):
 
         successes = 1
         for resp in self.cpool:
-            if not is_success(resp.status):
+            if not resp or not is_success(resp.status):
                 continue
-            successes += 1
-            headers = resp.getheaders()
-            if resp.getheader('X-Container-Object-Count') > obj_count:
-                obj_count = resp.getheader('X-Container-Object-Count')
-                found_pivot = resp.getheader('X-Backend-Pivot-Point')
+            else:
+                successes += 1
+                headers = resp.getheaders()
+                if resp.getheader('X-Container-Object-Count') > obj_count:
+                    obj_count = resp.getheader('X-Container-Object-Count')
+                    found_pivot = resp.getheader('X-Backend-Pivot-Point')
 
         quorum = self.ring.replica_count / 2 + 1
         if successes < quorum:

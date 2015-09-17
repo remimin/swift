@@ -488,6 +488,9 @@ class ContainerController(BaseStorageServer):
         :params record: object entry record
         :returns: modified record
         """
+        if isinstance(record, dict):
+            # Conversion has already happened (e.g. from a sharded node)
+            return record
         (name, created, size, content_type, etag) = record[:5]
         if content_type is None:
             return {'subdir': name}
@@ -501,16 +504,17 @@ class ContainerController(BaseStorageServer):
                           end_marker='', prefix='',
                           limit=constraints.CONTAINER_LISTING_LIMIT):
 
-        def _send_request(node, part, op, path):
+        def _send_request(node, part, op, path, params):
             try:
+                qs = '&'.join(['='.join(v) for v in params.iteritems()])
                 with ConnectionTimeout(self.conn_timeout):
                     conn = http_connect(
                         node['ip'], node['port'], node['device'], part, op,
-                        path)
+                        path, query_string=qs)
                 with Timeout(self.node_timeout):
                     resp = conn.getresponse()
                     return resp
-            except (Exception, Timeout):
+            except (Exception, Timeout) as ex:
                 return None
 
         # Firstly we need the requested container's, the root container, pivot
@@ -519,6 +523,7 @@ class ContainerController(BaseStorageServer):
 
         # Now we need to find out where to start from.
         start = True
+        spiv = sw = epiv = ew = None
         if marker or prefix:
             spiv, sw = tree.get(max(marker, prefix))
             start = False
@@ -530,6 +535,7 @@ class ContainerController(BaseStorageServer):
         object_count = 0
         object_bytes = 0
         objects = list()
+        params = req.params.copy()
         for leaf, leaf_weight in tree.leaves_iter():
             if not start and spiv:
                 if leaf.key == spiv.key and sw == leaf_weight:
@@ -542,18 +548,23 @@ class ContainerController(BaseStorageServer):
 
             piv_acct, piv_cont = pivot_to_pivot_container(
                 broker.account, broker.container, leaf.key, leaf_weight)
-            path = '/%s/%s?format=json&limit=%d' % (piv_acct, piv_cont, limit)
+            path = '/%s/%s' % (piv_acct, piv_cont)
+            if req.method == 'GET':
+                params.update({'format': 'json', 'limit': str(limit)})
             part, nodes = self.ring.get_nodes(piv_acct, piv_cont)
             shuffle(nodes)
             for node in nodes:
-                resp = _send_request(node, part, req.method, path)
+                resp = _send_request(node, part, req.method, path, params)
                 if resp and is_success(resp.status):
                     object_count += \
                         int(resp.getheader('X-Container-Object-Count')) or 0
                     object_bytes += \
                         int(resp.getheader('X-Container-Bytes-Used')) or 0
                     if req.method == 'GET':
-                        objs = json.load(resp)
+                        try:
+                            objs = json.load(resp)
+                        except ValueError as ex:
+                            objs = []
                         if objs:
                             objects.extend(objs)
                             limit -= len(objs)
@@ -649,7 +660,11 @@ class ContainerController(BaseStorageServer):
         else:
             if not container_list:
                 return HTTPNoContent(request=req, headers=resp_headers)
-            ret.body = '\n'.join(rec[0] for rec in container_list) + '\n'
+            if isinstance(container_list[0], dict):
+                index = 'name'
+            else:
+                index = 0
+            ret.body = '\n'.join(rec[index] for rec in container_list) + '\n'
         return ret
 
     @public
