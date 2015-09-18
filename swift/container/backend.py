@@ -990,21 +990,21 @@ class ContainerBroker(DatabaseBroker):
             'COMMIT;')
 
     def get_pivot_points(self):
-        data = []
         self._commit_puts_stale_ok()
         with self.get() as conn:
             try:
-                data = list(conn.execute('''
-                    SELECT name, created_at, level
+                data = conn.execute('''
+                    SELECT name, created_at, level, '', ''
                     FROM pivot_points
                     WHERE deleted=0
                     ORDER BY level;
-                    '''))
+                    ''')
+                data.row_factory = None
+                return [row for row in data]
             except sqlite3.OperationalError as err:
                 if 'no such table: pivot_points' in str(err):
                     self.create_pivot_points_table(conn)
-            finally:
-                return data
+            return []
 
     def pivot_nodes_to_items(self, nodes):
         result = list()

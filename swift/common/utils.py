@@ -3715,8 +3715,8 @@ class PivotTree(object):
         pivot, weight = self.get(pivot)
         gt = lt = None
 
-        if pivot is None:
-            # Empty pivot tree, return with (None, None)
+        if pivot is None or pivot.parent is None:
+            # Empty pivot tree or the root pivot, return with (None, None)
             return None, None
 
         # Now to find the boundaries, visiting the parent will give us one of
@@ -3832,13 +3832,13 @@ class PivotNode(object):
             if self._left:
                 return self._left.add(key, timestamp)
             else:
-                self._left = PivotNode(key, timestamp, parent=self._key)
+                self._left = PivotNode(key, timestamp, parent=self)
                 return True
         elif key > self.key:
             if self._right:
                 return self._right.add(key, timestamp)
             else:
-                self._right = PivotNode(key, timestamp, parent=self._key)
+                self._right = PivotNode(key, timestamp, parent=self)
                 return True
         if key in (self._right.key, self._left.key):
             # Key already exists
@@ -3904,8 +3904,8 @@ def pivot_to_pivot_container(account, container, pivot_point, weight):
 def pivot_container_to_pivot(root_container, container):
     if root_container == container:
         return None, None
-    pivot = container[len(root_container) + 2:]
-    weight = container[len(root_container):len(container) + 2]
+    pivot = container[len(root_container) + 4:]
+    weight = container[len(root_container):len(container) + 4]
     if weight.startswith('.le.'):
         weight = -1
     else:
