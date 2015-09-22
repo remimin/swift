@@ -989,16 +989,27 @@ class ContainerBroker(DatabaseBroker):
             CONTAINER_STAT_VIEW_SCRIPT +
             'COMMIT;')
 
-    def get_pivot_points(self):
+    def get_pivot_points(self, padded=False):
+        """
+
+        :param padded: Add extra empty string results to it matches a standard
+                       object. This is used when listing pivot nodes in
+                       container listings.
+        :return:
+        """
         self._commit_puts_stale_ok()
         with self.get() as conn:
             try:
-                data = conn.execute('''
-                    SELECT name, created_at, level, '', ''
+                if padded:
+                    sql = "SELECT name, created_at, level, '', ''"
+                else:
+                    sql = "SELECT name, created_at, level"
+                sql += '''
                     FROM pivot_points
                     WHERE deleted=0
                     ORDER BY level;
-                    ''')
+                    '''
+                data = conn.execute(sql)
                 data.row_factory = None
                 return [row for row in data]
             except sqlite3.OperationalError as err:

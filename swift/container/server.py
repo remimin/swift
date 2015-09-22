@@ -570,6 +570,7 @@ class ContainerController(BaseStorageServer):
                             limit -= len(objs)
                         else:
                             end = True
+                    break
             if end:
                 break
         headers['X-Container-Object-Count'] = object_count
@@ -617,7 +618,7 @@ class ContainerController(BaseStorageServer):
         if is_deleted:
             return HTTPNotFound(request=req, headers=resp_headers)
         if nodes and nodes.lower() == "pivot":
-            container_list = broker.get_pivot_points()
+            container_list = broker.get_pivot_points(padded=True)
         elif len(broker.get_pivot_points()) > 0:
             # Sharded container so we need to pass to GETorHEAD_sharded
             return self.GETorHEAD_sharded(req, broker, resp_headers, marker,
