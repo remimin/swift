@@ -198,6 +198,7 @@ class Bulk(BaseMiddleware):
     payload sent to the proxy (the list of objects/containers to be deleted).
     """
     group = POST_AUTH
+    before = ['VersionedWritesMiddleware']
 
     def __init__(self, app, conf, max_containers_per_extraction=10000,
                  max_failed_extractions=1000, max_deletes_per_request=10000,

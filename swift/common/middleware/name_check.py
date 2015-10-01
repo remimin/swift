@@ -55,8 +55,6 @@ FORBIDDEN_REGEXP = "/\./|/\.\./|/\.$|/\.\.$"
 
 class NameCheckMiddleware(BaseMiddleware):
     group = POST_AUTH
-    before = ['ProxyLoggingMiddleware']
-    after = ['ProxyLoggingMiddleware']
 
     def __init__(self, app, conf):
         self.app = app
