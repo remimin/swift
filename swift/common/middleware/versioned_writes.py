@@ -115,6 +115,7 @@ Disable versioning from a container (x is any value except empty)::
 
 import time
 from urllib import quote, unquote
+from swift.common.middleware import BaseMiddleware, POST_AUTH
 from swift.common.utils import get_logger, Timestamp, json, \
     register_swift_info, config_true_value
 from swift.common.request_helpers import get_sys_meta_prefix
@@ -331,7 +332,8 @@ class VersionedWritesContext(WSGIContext):
         return app_resp
 
 
-class VersionedWritesMiddleware(object):
+class VersionedWritesMiddleware(BaseMiddleware):
+    group = POST_AUTH
 
     def __init__(self, app, conf):
         self.app = app

@@ -75,6 +75,7 @@ import sys
 import time
 from urllib import quote, unquote
 
+from swift.common.middleware import BaseMiddleware
 from swift.common.swob import Request
 from swift.common.utils import (get_logger, get_remote_client,
                                 get_valid_utf8_str, config_true_value,
@@ -85,7 +86,7 @@ from swift.common.storage_policy import POLICIES
 QUOTE_SAFE = '/:'
 
 
-class ProxyLoggingMiddleware(object):
+class ProxyLoggingMiddleware(BaseMiddleware):
     """
     Middleware that logs Swift proxy requests in the swift log format.
     """

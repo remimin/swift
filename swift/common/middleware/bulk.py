@@ -19,6 +19,7 @@ from xml.sax import saxutils
 from time import time
 from eventlet import sleep
 import zlib
+from swift.common.middleware import BaseMiddleware, POST_AUTH
 from swift.common.swob import Request, HTTPBadGateway, \
     HTTPCreated, HTTPBadRequest, HTTPNotFound, HTTPUnauthorized, HTTPOk, \
     HTTPPreconditionFailed, HTTPRequestEntityTooLarge, HTTPNotAcceptable, \
@@ -92,7 +93,7 @@ def pax_key_to_swift_header(pax_key):
         return None
 
 
-class Bulk(object):
+class Bulk(BaseMiddleware):
     """
     Middleware that will do many operations on a single request.
 
@@ -196,6 +197,7 @@ class Bulk(object):
     swift.source set and the content length will reflect the size of the
     payload sent to the proxy (the list of objects/containers to be deleted).
     """
+    group = POST_AUTH
 
     def __init__(self, app, conf, max_containers_per_extraction=10000,
                  max_failed_extractions=1000, max_deletes_per_request=10000,

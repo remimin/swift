@@ -26,6 +26,7 @@ from eventlet import Timeout
 
 from swift import __canonical_version__ as swift_version
 from swift.common import constraints
+from swift.common.middleware import APP
 from swift.common.storage_policy import POLICIES
 from swift.common.ring import Ring
 from swift.common.utils import cache_from_env, get_logger, \
@@ -72,6 +73,7 @@ required_filters = [
 
 class Application(object):
     """WSGI application for the proxy server."""
+    group = APP
 
     def __init__(self, conf, memcache=None, logger=None, account_ring=None,
                  container_ring=None):

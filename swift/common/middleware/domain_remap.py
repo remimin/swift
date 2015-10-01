@@ -50,11 +50,12 @@ advised. With container sync, you should use the true storage end points as
 sync destinations.
 """
 
+from swift.common.middleware import BaseMiddleware, PRE_AUTH
 from swift.common.swob import Request, HTTPBadRequest
 from swift.common.utils import list_from_csv, register_swift_info
 
 
-class DomainRemapMiddleware(object):
+class DomainRemapMiddleware(BaseMiddleware):
     """
     Domain Remap Middleware
 
@@ -64,6 +65,7 @@ class DomainRemapMiddleware(object):
                 chain.
     :param conf: The configuration dict for the middleware.
     """
+    group = PRE_AUTH
 
     def __init__(self, app, conf):
         self.app = app

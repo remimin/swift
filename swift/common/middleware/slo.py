@@ -162,6 +162,7 @@ import six
 from six import BytesIO
 from hashlib import md5
 from swift.common.exceptions import ListingIterError, SegmentError
+from swift.common.middleware import BaseMiddleware, POST_AUTH
 from swift.common.swob import Request, HTTPBadRequest, HTTPServerError, \
     HTTPMethodNotAllowed, HTTPRequestEntityTooLarge, HTTPLengthRequired, \
     HTTPOk, HTTPPreconditionFailed, HTTPException, HTTPNotFound, \
@@ -561,7 +562,7 @@ class SloGetContext(WSGIContext):
         return response
 
 
-class StaticLargeObject(object):
+class StaticLargeObject(BaseMiddleware):
     """
     StaticLargeObject Middleware
 
@@ -573,6 +574,8 @@ class StaticLargeObject(object):
     :param app: The next WSGI filter or app in the paste.deploy chain.
     :param conf: The configuration dict for the middleware.
     """
+    group = POST_AUTH
+    before = ['VersionedWritesMiddleware']
 
     def __init__(self, app, conf, min_segment_size=DEFAULT_MIN_SEGMENT_SIZE,
                  max_manifest_segments=DEFAULT_MAX_MANIFEST_SEGMENTS,

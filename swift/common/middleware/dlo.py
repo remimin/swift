@@ -21,6 +21,7 @@ from hashlib import md5
 from swift.common import constraints
 from swift.common.exceptions import ListingIterError, SegmentError
 from swift.common.http import is_success
+from swift.common.middleware import BaseMiddleware, POST_AUTH
 from swift.common.swob import Request, Response, \
     HTTPRequestedRangeNotSatisfiable, HTTPBadRequest, HTTPConflict
 from swift.common.utils import get_logger, json, \
@@ -249,7 +250,10 @@ class GetContext(WSGIContext):
             return resp_iter
 
 
-class DynamicLargeObject(object):
+class DynamicLargeObject(BaseMiddleware):
+    before = ['VersionedWritesMiddleware']
+    group = POST_AUTH
+
     def __init__(self, app, conf):
         self.app = app
         self.logger = get_logger(conf, log_route='dlo')

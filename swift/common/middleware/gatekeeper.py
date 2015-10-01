@@ -31,6 +31,7 @@ automatically inserted close to the start of the pipeline by the proxy server.
 """
 
 
+from swift.common.middleware import BaseMiddleware, FIRST
 from swift.common.swob import Request
 from swift.common.utils import get_logger
 from swift.common.request_helpers import remove_items, get_sys_meta_prefix
@@ -63,7 +64,9 @@ def make_exclusion_test(exclusions):
     return test.match
 
 
-class GatekeeperMiddleware(object):
+class GatekeeperMiddleware(BaseMiddleware):
+    group = FIRST
+
     def __init__(self, app, conf):
         self.app = app
         self.logger = get_logger(conf, log_route='gatekeeper')

@@ -15,10 +15,11 @@
 
 import os
 
+from swift.common.middleware import BaseMiddleware, FIRST
 from swift.common.swob import Request, Response
 
 
-class HealthCheckMiddleware(object):
+class HealthCheckMiddleware(BaseMiddleware):
     """
     Healthcheck middleware used for monitoring.
 
@@ -28,6 +29,8 @@ class HealthCheckMiddleware(object):
     present at that path, it will respond 503 with "DISABLED BY FILE" as the
     body.
     """
+    group = FIRST
+    after = ['GatekeeperMiddleware', 'CatchErrorMiddleware']
 
     def __init__(self, app, conf):
         self.app = app

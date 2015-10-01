@@ -15,6 +15,7 @@
 
 from swift import gettext_ as _
 
+from swift.common.middleware import BaseMiddleware, FIRST
 from swift.common.swob import Request, HTTPServerError
 from swift.common.utils import get_logger, generate_trans_id
 from swift.common.wsgi import WSGIContext
@@ -56,11 +57,13 @@ class CatchErrorsContext(WSGIContext):
         return resp
 
 
-class CatchErrorMiddleware(object):
+class CatchErrorMiddleware(BaseMiddleware):
     """
     Middleware that provides high-level error handling and ensures that a
     transaction id will be set for every request.
     """
+    group = FIRST
+    before = ['GatekeeperMiddleware']
 
     def __init__(self, app, conf):
         self.app = app

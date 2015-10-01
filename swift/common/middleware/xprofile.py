@@ -82,6 +82,7 @@ from eventlet import greenthread, GreenPool, patcher
 import eventlet.green.profile as eprofile
 
 from swift import gettext_ as _
+from swift.common.middleware import BaseMiddleware, POST_AUTH
 from swift.common.utils import get_logger, config_true_value
 from swift.common.swob import Request
 from x_profile.exceptions import NotFoundException, MethodNotAllowed,\
@@ -160,7 +161,8 @@ def new_runcall(self, func, *args, **kw):
         self.TallyTimings()
 
 
-class ProfileMiddleware(object):
+class ProfileMiddleware(BaseMiddleware):
+    group = POST_AUTH
 
     def __init__(self, app, conf):
         self.app = app

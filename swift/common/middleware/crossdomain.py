@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from swift.common.middleware import BaseMiddleware, PRE_AUTH
 from swift.common.swob import Request, Response
 from swift.common.utils import register_swift_info
 
 
-class CrossDomainMiddleware(object):
+class CrossDomainMiddleware(BaseMiddleware):
 
     """
     Cross domain middleware used to respond to requests for cross domain
@@ -54,6 +55,7 @@ class CrossDomainMiddleware(object):
 
 
     """
+    group = PRE_AUTH
 
     def __init__(self, app, conf, *args, **kwargs):
         self.app = app

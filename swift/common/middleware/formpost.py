@@ -119,6 +119,7 @@ from time import time
 from urllib import quote
 
 from swift.common.exceptions import MimeInvalid
+from swift.common.middleware import BaseMiddleware, PRE_AUTH
 from swift.common.middleware.tempurl import get_tempurl_keys_from_metadata
 from swift.common.utils import streq_const_time, register_swift_info, \
     parse_content_disposition, iter_multipart_mime_documents
@@ -177,7 +178,7 @@ class _CappedFileLikeObject(object):
         return ret
 
 
-class FormPost(object):
+class FormPost(BaseMiddleware):
     """
     FormPost Middleware
 
@@ -190,6 +191,7 @@ class FormPost(object):
                 chain.
     :param conf: The configuration dict for the middleware.
     """
+    group = PRE_AUTH
 
     def __init__(self, app, conf):
         #: The next WSGI application/filter in the paste.deploy pipeline.

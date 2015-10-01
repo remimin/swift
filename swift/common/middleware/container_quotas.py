@@ -54,13 +54,16 @@ For example::
 from swift.common.constraints import check_copy_from_header, \
     check_account_format, check_destination_header
 from swift.common.http import is_success
+from swift.common.middleware import BaseMiddleware, POST_AUTH
 from swift.common.swob import HTTPRequestEntityTooLarge, HTTPBadRequest, \
     wsgify
 from swift.common.utils import register_swift_info
 from swift.proxy.controllers.base import get_container_info, get_object_info
 
 
-class ContainerQuotaMiddleware(object):
+class ContainerQuotaMiddleware(BaseMiddleware):
+    group = POST_AUTH
+
     def __init__(self, app, *args, **kwargs):
         self.app = app
 

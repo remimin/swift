@@ -41,6 +41,7 @@ The filter returns HTTPBadRequest if path is invalid.
 '''
 
 import re
+from swift.common.middleware import BaseMiddleware, POST_AUTH
 from swift.common.utils import get_logger
 from urllib2 import unquote
 
@@ -52,7 +53,10 @@ MAX_LENGTH = 255
 FORBIDDEN_REGEXP = "/\./|/\.\./|/\.$|/\.\.$"
 
 
-class NameCheckMiddleware(object):
+class NameCheckMiddleware(BaseMiddleware):
+    group = POST_AUTH
+    before = ['ProxyLoggingMiddleware']
+    after = ['ProxyLoggingMiddleware']
 
     def __init__(self, app, conf):
         self.app = app

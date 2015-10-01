@@ -24,6 +24,7 @@ import hmac
 import base64
 
 from eventlet import Timeout
+from swift.common.middleware import BaseMiddleware, AUTH
 from swift.common.swob import Response, Request
 from swift.common.swob import HTTPBadRequest, HTTPForbidden, HTTPNotFound, \
     HTTPUnauthorized
@@ -37,7 +38,7 @@ from swift.common.utils import config_read_reseller_options
 from swift.proxy.controllers.base import get_account_info
 
 
-class TempAuth(object):
+class TempAuth(BaseMiddleware):
     """
     Test authentication and authorization system.
 
@@ -154,6 +155,7 @@ class TempAuth(object):
     :param app: The next WSGI app in the pipeline
     :param conf: The dict of configuration values from the Paste config file
     """
+    group = AUTH
 
     def __init__(self, app, conf):
         self.app = app

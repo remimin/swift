@@ -122,6 +122,7 @@ from urllib import urlencode
 from urlparse import parse_qs
 
 from swift.proxy.controllers.base import get_account_info, get_container_info
+from swift.common.middleware import BaseMiddleware, PRE_AUTH
 from swift.common.swob import HeaderKeyDict, HTTPUnauthorized, HTTPBadRequest
 from swift.common.utils import split_path, get_valid_utf8_str, \
     register_swift_info, get_hmac, streq_const_time, quote
@@ -208,7 +209,7 @@ def authorize_same_container(account_to_match, container_to_match):
     return auth_callback_same_container
 
 
-class TempURL(object):
+class TempURL(BaseMiddleware):
     """
     WSGI Middleware to grant temporary URLs specific access to Swift
     resources. See the overview for more information.
@@ -257,6 +258,7 @@ class TempURL(object):
                 chain.
     :param conf: The configuration dict for the middleware.
     """
+    group = PRE_AUTH
 
     def __init__(self, app, conf,
                  methods=('GET', 'HEAD', 'PUT', 'POST', 'DELETE')):

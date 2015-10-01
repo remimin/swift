@@ -31,6 +31,7 @@ from six.moves import range
 
 import socket
 from swift import gettext_ as _
+from swift.common.middleware import BaseMiddleware, SHORT_CIRCUIT
 
 try:
     import dns.resolver
@@ -75,7 +76,7 @@ def is_ip(domain):
             return False
 
 
-class CNAMELookupMiddleware(object):
+class CNAMELookupMiddleware(BaseMiddleware):
     """
     CNAME Lookup Middleware
 
@@ -85,6 +86,7 @@ class CNAMELookupMiddleware(object):
                 chain.
     :param conf: The configuration dict for the middleware.
     """
+    group = SHORT_CIRCUIT
 
     def __init__(self, app, conf):
         if not MODULE_DEPENDENCY_MET:

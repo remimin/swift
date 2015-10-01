@@ -17,6 +17,7 @@ from swift import gettext_ as _
 
 import eventlet
 
+from swift.common.middleware import BaseMiddleware, PRE_AUTH
 from swift.common.utils import cache_from_env, get_logger, register_swift_info
 from swift.proxy.controllers.base import get_account_info, get_container_info
 from swift.common.memcached import MemcacheConnectionError
@@ -84,14 +85,14 @@ class MaxSleepTimeHitError(Exception):
     pass
 
 
-class RateLimitMiddleware(object):
+class RateLimitMiddleware(BaseMiddleware):
     """
     Rate limiting middleware
 
     Rate limits requests on both an Account and Container level.  Limits are
     configurable.
     """
-
+    group = PRE_AUTH
     BLACK_LIST_SLEEP = 1
 
     def __init__(self, app, conf, logger=None):

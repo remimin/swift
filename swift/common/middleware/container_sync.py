@@ -15,6 +15,7 @@
 
 import os
 
+from swift.common.middleware import BaseMiddleware, PRE_AUTH
 from swift.common.container_sync_realms import ContainerSyncRealms
 from swift.common.swob import HTTPBadRequest, HTTPUnauthorized, wsgify
 from swift.common.utils import (
@@ -22,11 +23,12 @@ from swift.common.utils import (
 from swift.proxy.controllers.base import get_container_info
 
 
-class ContainerSync(object):
+class ContainerSync(BaseMiddleware):
     """
     WSGI middleware that validates an incoming container sync request
     using the container-sync-realms.conf style of container sync.
     """
+    group = PRE_AUTH
 
     def __init__(self, app, conf, logger=None):
         self.app = app

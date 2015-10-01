@@ -19,12 +19,14 @@ from six.moves.configparser import ConfigParser, NoSectionError, NoOptionError
 
 from swift.common.memcached import (MemcacheRing, CONN_TIMEOUT, POOL_TIMEOUT,
                                     IO_TIMEOUT, TRY_COUNT)
+from swift.common.middleware import BaseMiddleware, PRE_AUTH
 
 
-class MemcacheMiddleware(object):
+class MemcacheMiddleware(BaseMiddleware):
     """
     Caching middleware that manages caching in swift.
     """
+    group = PRE_AUTH
 
     def __init__(self, app, conf):
         self.app = app

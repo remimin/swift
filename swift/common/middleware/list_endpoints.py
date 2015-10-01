@@ -80,6 +80,7 @@ environment (everyone can query the locality data using this middleware).
 
 from urllib import quote, unquote
 
+from swift.common.middleware import BaseMiddleware, POST_AUTH
 from swift.common.ring import Ring
 from swift.common.utils import json, get_logger, split_path
 from swift.common.swob import Request, Response
@@ -90,7 +91,7 @@ from swift.proxy.controllers.base import get_container_info
 RESPONSE_VERSIONS = (1.0, 2.0)
 
 
-class ListEndpointsMiddleware(object):
+class ListEndpointsMiddleware(BaseMiddleware):
     """
     List endpoints for an object, account or container.
 
@@ -102,6 +103,7 @@ class ListEndpointsMiddleware(object):
                 chain.
     :param conf: The configuration dict for the middleware.
     """
+    group = POST_AUTH
 
     def __init__(self, app, conf):
         self.app = app

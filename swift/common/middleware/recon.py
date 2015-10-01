@@ -19,6 +19,7 @@ import time
 from swift import gettext_ as _
 
 from swift import __version__ as swiftver
+from swift.common.middleware import BaseMiddleware, POST_AUTH
 from swift.common.storage_policy import POLICIES
 from swift.common.swob import Request, Response
 from swift.common.utils import get_logger, config_true_value, json, \
@@ -28,7 +29,7 @@ from resource import getpagesize
 from hashlib import md5
 
 
-class ReconMiddleware(object):
+class ReconMiddleware(BaseMiddleware):
     """
     Recon middleware used for monitoring.
 
@@ -41,6 +42,7 @@ class ReconMiddleware(object):
     use = egg:swift#recon
     recon_cache_path = /var/cache/swift
     """
+    group = POST_AUTH
 
     def __init__(self, app, conf, *args, **kwargs):
         self.app = app

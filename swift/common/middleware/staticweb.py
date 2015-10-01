@@ -120,6 +120,7 @@ import cgi
 import json
 import time
 
+from swift.common.middleware import BaseMiddleware, POST_AUTH
 from swift.common.utils import human_readable, split_path, config_true_value, \
     quote, register_swift_info
 from swift.common.wsgi import make_pre_authed_env, WSGIContext
@@ -446,7 +447,7 @@ class _StaticWebContext(WSGIContext):
             return self._listing(env, start_response, self.obj)
 
 
-class StaticWeb(object):
+class StaticWeb(BaseMiddleware):
     """
     The Static Web WSGI middleware filter; serves container data as a static
     web site. See `staticweb`_ for an overview.
@@ -457,6 +458,7 @@ class StaticWeb(object):
     :param app: The next WSGI application/filter in the paste.deploy pipeline.
     :param conf: The filter configuration dict.
     """
+    group = POST_AUTH
 
     def __init__(self, app, conf):
         #: The next WSGI application/filter in the paste.deploy pipeline.

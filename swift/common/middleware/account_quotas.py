@@ -53,18 +53,21 @@ account size has been updated.
 """
 
 from swift.common.constraints import check_copy_from_header
+from swift.common.middleware import BaseMiddleware, POST_AUTH
 from swift.common.swob import HTTPForbidden, HTTPBadRequest, \
     HTTPRequestEntityTooLarge, wsgify
 from swift.common.utils import register_swift_info
 from swift.proxy.controllers.base import get_account_info, get_object_info
 
 
-class AccountQuotaMiddleware(object):
+class AccountQuotaMiddleware(BaseMiddleware):
     """Account quota middleware
 
     See above for a full description.
 
     """
+    group = POST_AUTH
+
     def __init__(self, app, *args, **kwargs):
         self.app = app
 

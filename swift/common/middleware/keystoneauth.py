@@ -14,7 +14,7 @@
 
 from swift.common import utils as swift_utils
 from swift.common.http import is_success
-from swift.common.middleware import acl as swift_acl
+from swift.common.middleware import BaseMiddleware, AUTH, acl as swift_acl
 from swift.common.request_helpers import get_sys_meta_prefix
 from swift.common.swob import HTTPNotFound, HTTPForbidden, HTTPUnauthorized
 from swift.common.utils import config_read_reseller_options, list_from_csv
@@ -28,7 +28,7 @@ PROJECT_DOMAIN_ID_SYSMETA_HEADER = \
 UNKNOWN_ID = '_unknown'
 
 
-class KeystoneAuth(object):
+class KeystoneAuth(BaseMiddleware):
     """Swift middleware to Keystone authorization system.
 
     In Swift's proxy-server.conf add this middleware to your pipeline::
@@ -176,6 +176,10 @@ class KeystoneAuth(object):
     :param app: The next WSGI app in the pipeline
     :param conf: The dict of configuration values
     """
+    group = AUTH
+    # AuthProtocol == auth_token middleware
+    requires = ['AuthProtocol']
+
     def __init__(self, app, conf):
         self.app = app
         self.conf = conf

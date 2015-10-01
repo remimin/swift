@@ -15,6 +15,7 @@
 
 import inspect
 from swift import __version__ as swift_version
+from swift.common.middleware import APP
 from swift.common.utils import public, timing_stats, config_true_value
 from swift.common.swob import Response
 
@@ -23,6 +24,7 @@ class BaseStorageServer(object):
     """
     Implements common OPTIONS method for object, account, container servers.
     """
+    group = APP
 
     def __init__(self, conf, **kwargs):
         self._allowed_methods = None
