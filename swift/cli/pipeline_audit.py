@@ -84,8 +84,8 @@ def reorder_groups(pipeline, group_map, new_group_map):
         for i, index in enumerate(old_group):
             if index not in new_group:
                 sys.stdout.write(
-                    'Middleware %s needs to move to before %s\n' %
-                    (pipeline[index]['name'], pipeline[new_group[i]]['name']))
+                    'Middleware %s needs to move to position %d\n' %
+                    (pipeline[index]['name'], new_group[i]))
             new_pipeline[new_group[i]] = pipeline[index]
     return new_pipeline, new_group_map
 
@@ -145,7 +145,11 @@ def parse_config(config, build=False):
         if ep in filter_eps:
             if i == len(p_items) - 1:
                 # At the last item, it has to be an app
-                raise PipelineError('Last item in pipeline must be an app')
+                msg = 'Last item in pipeline must be an app'
+                if build:
+                    sys.stdout.write(msg + '\n')
+                else:
+                    raise PipelineError(msg)
             # load the item
             obj = load_item(filter_eps[ep])
             obj_name = obj.__class__.__name__
@@ -165,7 +169,7 @@ def parse_config(config, build=False):
                 item_data['group'] = NONE
 
             if item_data['group'] == NONE:
-                sys.stderr.write("Middleware %s isn't a member of a group, so"
+                sys.stderr.write("Middleware %s isn't a member of a group, so "
                                  "it will be up to you to make sure it is in "
                                  "the correct position.\n" % item)
 
@@ -176,8 +180,12 @@ def parse_config(config, build=False):
             pipeline.append(item_data)
         elif ep in app_eps:
             if i != len(p_items) - 1:
-                raise PipelineError('Middleware %s is an app. It can only '
-                                    'appear at the end of the pipeline', item)
+                msg = 'Middleware %s is an app. It can only ' % item
+                msg += 'appear at the end of the pipeline'
+                if build:
+                    sys.stdout.write(msg + '\n')
+                else:
+                    raise PipelineError(msg)
             # load the item
             item_data = data.copy()
             item_data.update({'name': item, 'group': APP})
