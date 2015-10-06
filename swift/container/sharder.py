@@ -26,7 +26,7 @@ from eventlet import Timeout
 from swift.container.replicator import ContainerReplicator
 from swift.container.backend import ContainerBroker, DATADIR, \
     RECORD_TYPE_PIVOT_NODE, RECORD_TYPE_OBJECT
-from swift.common import ring, internal_client
+from swift.common import ring, internal_client, db_replicator
 from swift.common.bufferedhttp import http_connect
 from swift.common.db import DatabaseAlreadyExists
 from swift.common.exceptions import DeviceUnavailable, ConnectionTimeout
@@ -37,7 +37,7 @@ from swift.common.ring.utils import is_local_device
 from swift.common.utils import get_logger, audit_location_generator, \
     config_true_value, dump_recon_cache, whataremyips, hash_path, \
     storage_directory, Timestamp, PivotTree, pivot_to_pivot_container, \
-    pivot_container_to_pivot, GreenAsyncPile
+    pivot_container_to_pivot, GreenAsyncPile, ismount
 from swift.common.wsgi import ConfigString
 from swift.common.storage_policy import POLICIES
 
@@ -177,12 +177,14 @@ class ContainerSharder(ContainerReplicator):
         headers = dict()
         if newest:
             headers['X-Newest'] = 'true'
-        resp = self.swift.make_request('GET', path, headers,
-                                       acceptable_statuses=(2,))
-        if not resp.is_success:
+        try:
+            resp = self.swift.make_request('GET', path, headers,
+                                           acceptable_statuses=(2,))
+        except internal_client.UnexpectedResponse as ex:
             self.logger.error(_("Failed to get pivot points from %s/%s"),
                               account, container)
             return None
+
         tree = PivotTree()
         try:
             for pivot in json.loads(resp.body):
@@ -399,7 +401,7 @@ class ContainerSharder(ContainerReplicator):
                                'in %s/%s'), broker.account, broker.container)
             for p_and_w, obj_list in pivot_to_obj.iteritems():
                 part, new_broker, node_id = self._get_and_fill_shard_broker(
-                    p_and_w[0], p_and_w[1], obj_list, root_account,
+                    p_and_w[0].key, p_and_w[1], obj_list, root_account,
                     root_container, policy_index)
 
                 self.cpool.spawn(
@@ -474,6 +476,7 @@ class ContainerSharder(ContainerReplicator):
 
     def _audit_shard_container(self, broker, pivot, root_account=None,
                                root_container=None):
+
         self.logger.info(_('Auditing %s/%s'), broker.account, broker.container)
         continue_with_container = True
         if not root_account or not root_container:
@@ -490,8 +493,14 @@ class ContainerSharder(ContainerReplicator):
         parent = None
         # Get the root view of the world.
         tree = self._get_pivot_tree(root_account, root_container, newest=True)
-        parent_tree = None
-        node, _weight = tree.get(pivot)
+        if tree is None:
+            # failed to get the root tree. Error out for now.. we may need to
+            # quarantine the container.
+            self.logger.warning(_("Failed to get a pivot tree from root "
+                                  "container %s/%s, it may not exist."),
+                                root_account, root_container)
+            return False
+        node, _weight = tree.get(pivot, leaf=False)
         if node:
             root_ok = True
             # the node exists so now we need to find the parent (if there
@@ -499,22 +508,22 @@ class ContainerSharder(ContainerReplicator):
             if node.parent is None:
                 # Parent is root
                 parent_ok = True
-                parent_tree = tree
             else:
                 if node.parent.left == node:
                     weight = -1
                 else:
                     weight = 1
-                parent = (node.key, weight)
+                parent = (node.parent.key, weight)
 
         if parent:
             # We need to check the pivot_nodes.
             acct, cont = pivot_to_pivot_container(root_account, root_container,
                                                   *parent)
             parent_tree = self._get_pivot_tree(acct, cont, newest=True)
-            node = tree.get(pivot)
-            if node:
-                parent_ok = True
+            if parent_tree:
+                node = tree.get(pivot)
+                if node:
+                    parent_ok = True
 
         if parent_ok and root_ok:
             # short circuit
@@ -522,6 +531,7 @@ class ContainerSharder(ContainerReplicator):
 
         if not parent_ok and not root_ok:
             # We need to quarantine
+            # We may actually never get here.. this needs to be re-thought.
             self.logger.warning(_("Shard container '%s/%s' is being "
                                   "quarantined, neither the root container "
                                   "'%s/%s' or it's parent knows of it's "
@@ -532,12 +542,12 @@ class ContainerSharder(ContainerReplicator):
             return continue_with_container
 
         timestamp = Timestamp(time.time()).internal
+        # update root container
+        tree.add(pivot)
+        level = tree.get_level(pivot)
+        pivot_point = [(pivot, timestamp, level)]
         if not parent_ok:
             # Update parent
-            parent_tree.add(pivot)
-            level = parent_tree.get_level(pivot)
-            pivot_point = (pivot, timestamp, level)
-
             if parent:
                 acct, cont = pivot_to_pivot_container(root_account,
                                                       root_container,
@@ -551,10 +561,6 @@ class ContainerSharder(ContainerReplicator):
                     pivot_point, broker.storage_policy_index)
         elif not root_ok:
             # update root container
-            tree.add(pivot)
-            level = tree.get_level(pivot)
-            pivot_point = (pivot, timestamp, level)
-
             self.logger.info(_("Shard container '%s/%s' is missing from "
                                "the root container '%s/%s', correcting."),
                              broker.account, broker.container,
@@ -579,18 +585,29 @@ class ContainerSharder(ContainerReplicator):
         :param reported:
         """
         self._zero_stats()
-        local_devs = self._get_local_devices()
-
         all_locs = audit_location_generator(self.devices, DATADIR, '.db',
                                             mount_check=self.mount_check,
                                             logger=self.logger)
         self.logger.info(_('Starting container sharding pass'))
+        dirs = []
         self.shard_brokers = dict()
         self.shard_cleanups = dict()
-        for path, device, partition in all_locs:
-            # Only shard local containers.
-            if device not in local_devs:
-                continue
+        self._local_device_ids = set()
+        self.ips = whataremyips()
+        for node in self.ring.devs:
+            if node and is_local_device(self.ips, self.port,
+                                        node['replication_ip'],
+                                        node['replication_port']):
+                if self.mount_check and not ismount(
+                        os.path.join(self.root, node['device'])):
+                    self.logger.warn(
+                        _('Skipping %(device)s as it is not mounted') % node)
+                    continue
+                datadir = os.path.join(self.root, node['device'], self.datadir)
+                if os.path.isdir(datadir):
+                    self._local_device_ids.add(node['id'])
+                    dirs.append((datadir, node['id']))
+        for part, path, node_id in db_replicator.roundrobin_datadirs(dirs):
             broker = ContainerBroker(path)
             sharded = broker.metadata.get('X-Container-Sysmeta-Sharding') or \
                 broker.metadata.get('X-Container-Sysmeta-Shard-Account')
@@ -641,7 +658,7 @@ class ContainerSharder(ContainerReplicator):
                 if new_pivot:
                     # We need to shard on the pivot point
                     self._shard_on_pivot(new_pivot, broker, root_account,
-                                         root_container)
+                                         root_container, node_id)
                 else:
                     # No pivot, so check to see if a pivot needs to be found.
                     obj_count = broker.get_info()['object_count']
@@ -774,7 +791,8 @@ class ContainerSharder(ContainerReplicator):
         self.logger.info(_('Best pivot point for %s/%s is %s'),
                          broker.account, broker.container, found_pivot)
 
-    def _shard_on_pivot(self, pivot, broker, root_account, root_container):
+    def _shard_on_pivot(self, pivot, broker, root_account, root_container,
+                        node_id):
         is_root = root_container == broker.container
         self.logger.info(_('Asking for quorum on a pivot point %s for '
                            '%s/%s'), pivot, broker.account, broker.container)
@@ -818,6 +836,23 @@ class ContainerSharder(ContainerReplicator):
         new_acct, new_right_cont = pivot_to_pivot_container(
             root_account, root_container, pivot, 1)
 
+        # pivot points to parent and root, Se we need to make sure we can grab
+        # the root tree before we move anything.
+        tree = self.tree_cache.get('')
+        if not tree:
+            if is_root:
+                tree = broker.build_pivot_tree()
+            else:
+                tree = self._get_pivot_tree(root_account, root_container, True)
+                if tree is None:
+                    self.logger.error(
+                        _("Since the audit run of this container and "
+                          "now we can't access the root container "
+                          "%s/%s aborting."),
+                        root_account, root_container)
+                    return
+            self.tree_cache[''] = tree
+
         # Make sure the account exists by running a container PUT
         try:
             policy = POLICIES.get_by_index(broker.storage_policy_index)
@@ -834,7 +869,7 @@ class ContainerSharder(ContainerReplicator):
 
         # there might be more then CONTAINER_LISTING_LIMIT items in the
         # new shard, if so add all the objects to the shard database.
-        def add_other_nodes(marker, broker_to_update, qry):
+        def add_other_items(marker, broker_to_update, qry):
             while marker:
                 qry['marker'] = marker
                 new_items = broker.list_objects_iter(
@@ -883,20 +918,13 @@ class ContainerSharder(ContainerReplicator):
                 self.logger.warning(_(str(duex)))
                 return
 
-            add_other_nodes(marker, new_broker, q)
+            add_other_items(marker, new_broker, q)
 
             self.logger.info(_('Replicating new shard container %s/%s'),
                              new_broker.account, new_broker.container)
             self.cpool.spawn(
                 self._replicate_object, part, new_broker.db_file, node_id)
             any(self.cpool)
-
-        # pivot points to parent and root, but first we need the pivot tree
-        # from the root container
-        tree = self.tree_cache.get('')
-        if not tree:
-            tree = self._get_pivot_tree(root_account, root_container, True)
-            self.tree_cache[''] = tree
 
         # Make sure the new distributed node has been added, to do this we need
         # to know what level it is. To get this we add it to the tree
@@ -914,6 +942,14 @@ class ContainerSharder(ContainerReplicator):
             self._push_pivot_point_to_container(None, None, root_account,
                                                 root_container, pivot_point,
                                                 broker.storage_policy_index)
+
+        # Now replicate the container we are working on
+        self.logger.info(_('Replicating container %s/%s'),
+                             broker.account, broker.container)
+        self.cpool.spawn(
+            self._replicate_object, part, broker.db_file, node_id)
+        any(self.cpool)
+
 
         self.logger.info(_('Finished sharding %s/%s, new shard '
                            'containers %s/%s and %s/%s. Sharded at pivot %s.'),

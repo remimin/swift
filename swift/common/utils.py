@@ -3683,10 +3683,10 @@ class PivotTree(object):
             return True
         return self._root.add(key, timestamp)
 
-    def get(self, key):
+    def get(self, key, leaf=True):
         if not self._root:
             return None, None
-        return self._root.get(key)
+        return self._root.get(key, leaf)
 
     def __getitem__(self, item):
         return self.get(item)
@@ -3828,6 +3828,8 @@ class PivotNode(object):
                 yield self, weight
 
     def add(self, key, timestamp=None):
+        if not isinstance(key, unicode):
+            key = unicode(key)
         if key < self.key:
             if self._left:
                 return self._left.add(key, timestamp)
@@ -3840,7 +3842,7 @@ class PivotNode(object):
             else:
                 self._right = PivotNode(key, timestamp, parent=self)
                 return True
-        if key in (self._right.key, self._left.key):
+        if key == self.key or key in (self._right.key, self._left.key):
             # Key already exists
             return False
 
@@ -3852,7 +3854,7 @@ class PivotNode(object):
         else:
             return -1
 
-    def get(self, key):
+    def get(self, key, leaf=True):
         """
         Given the key, return the PivotNode (where the object (key) will be
         stored) and an int representing where the key lies in relation to the
@@ -3865,12 +3867,17 @@ class PivotNode(object):
         :rtype : Tuple of PivitNode and int (node, int) where the int's
                  value represents the keys relation to the pivot point.
         """
-        if key <= self._key:
-            if self._left:
-                return self._left.get(key)
-        elif key > self._key:
+        if leaf:
+            if key <= self._key:
+                if self._left:
+                    return self._left.get(key)
+        else:
+            if key < self._key:
+                if self._left:
+                    return self._left.get(key, leaf)
+        if key > self._key:
             if self._right:
-                return self._right.get(key)
+                return self._right.get(key, leaf)
         return self, self._return_int(key)
 
     def __getitem__(self, item):
