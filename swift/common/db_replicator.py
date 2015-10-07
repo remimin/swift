@@ -319,6 +319,7 @@ class Replicator(Daemon):
             point = objects[-1]['ROWID']
             objects = broker.get_items_since(point, self.per_diff)
         if objects:
+            self._sync_other_items(broker, local_id, http)
             self.logger.debug(
                 'Synchronization for %s has fallen more than '
                 '%s rows behind; moving on and will try again next pass.',
@@ -326,26 +327,7 @@ class Replicator(Daemon):
             self.stats['diff_capped'] += 1
             self.logger.increment('diff_caps')
         else:
-            # Attempt to sync other items
-            # Note the following will have to be cleaned up at some point. The
-            # hook here is to grab other items (non-objects) to replicate,
-            # namely the pivot points stored in a container database. The
-            # number of these should always been _much_ less then normal
-            # objects, however for completeness we should probably have a
-            # limit and pointer here too.
-            other_items = self._other_items_hook(broker)
-            if other_items:
-                with Timeout(self.node_timeout):
-                    response = http.replicate('merge_items', other_items,
-                                              local_id)
-                if not response or response.status >= 300 \
-                        or response.status < 200:
-                    if response:
-                        self.logger.error(_('ERROR Bad response %(status)s '
-                                            'from %(host)s'),
-                                          {'status': response.status,
-                                           'host': http.host})
-                    return False
+            self._sync_other_items(broker, local_id, http)
 
             # Now merge_syncs
             with Timeout(self.node_timeout):
@@ -356,6 +338,29 @@ class Replicator(Daemon):
                                    incoming=False)
                 return True
         return False
+
+    def _sync_other_items(self, broker, local_id, http):
+
+        # Attempt to sync other items
+        # Note the following will have to be cleaned up at some point. The
+        # hook here is to grab other items (non-objects) to replicate,
+        # namely the pivot points stored in a container database. The
+        # number of these should always been _much_ less then normal
+        # objects, however for completeness we should probably have a
+        # limit and pointer here too.
+        other_items = self._other_items_hook(broker)
+        if other_items:
+            with Timeout(self.node_timeout):
+                response = http.replicate('merge_items', other_items,
+                                            local_id)
+            if not response or response.status >= 300 \
+                    or response.status < 200:
+                if response:
+                    self.logger.error(_('ERROR Bad response %(status)s '
+                                        'from %(host)s'),
+                                        {'status': response.status,
+                                        'host': http.host})
+                return False
 
     def _other_items_hook(self, broker):
         return []
