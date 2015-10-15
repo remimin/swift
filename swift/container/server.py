@@ -473,7 +473,8 @@ class ContainerController(BaseStorageServer):
             return HTTPNotFound(request=req, headers=headers)
         self._add_metadata(headers, broker.metadata)
         headers['Content-Type'] = out_content_type
-        if len(broker.get_pivot_points()) > 0:
+        if len(broker.get_pivot_points()) > 0 and \
+                not 'swift.skip_sharding' in req.environ:
             return self.GETorHEAD_sharded(req, broker, headers)
         return HTTPNoContent(request=req, headers=headers, charset='utf-8')
 

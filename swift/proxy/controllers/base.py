@@ -284,10 +284,12 @@ def get_object_info(env, app, path=None, swift_source=None):
     return info
 
 
-def get_container_info(env, app, swift_source=None):
+def get_container_info(env, app, swift_source=None, skip_sharding=False):
     """
     Get the info structure for a container, based on env and app.
-    This is useful to middlewares.
+    This is useful to middlewares. Setting skip_sharding to True speeds up
+    the request by not visiting all shard containers but bytes used and object
+    count will be incorrect.
 
     .. note::
 
@@ -296,7 +298,10 @@ def get_container_info(env, app, swift_source=None):
     """
     (version, account, container, unused) = \
         split_path(env['PATH_INFO'], 3, 4, True)
-    info = get_info(app, env, account, container, ret_not_found=True,
+    tmp_env = env.copy()
+    if skip_sharding:
+        tmp_env['swift.skip_sharding'] = True
+    info = get_info(app, tmp_env, account, container, ret_not_found=True,
                     swift_source=swift_source)
     if not info:
         info = headers_to_container_info({}, 0)
@@ -1226,7 +1231,7 @@ class Controller(object):
             container_count = int(info['container_count'])
         return partition, nodes, container_count
 
-    def container_info(self, account, container, req=None):
+    def container_info(self, account, container, req=None, skip_sharding=True):
         """
         Get container information and thusly verify container existence.
         This will also verify account existence.
@@ -1245,6 +1250,8 @@ class Controller(object):
             env = getattr(req, 'environ', {})
         else:
             env = {}
+        if skip_sharding:
+            env['swift.skip_sharding'] = True
         info = get_info(self.app, env, account, container)
         if not info:
             info = headers_to_container_info({}, 0)
