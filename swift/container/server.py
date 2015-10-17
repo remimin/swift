@@ -280,7 +280,7 @@ class ContainerController(BaseStorageServer):
                     l_ip, l_port = req.host.split(':')
                     idx = [i for i, node in enumerate(nodes)
                            if node['ip'] == l_ip and node['port'] == l_port
-                           and node['device'] == drive]
+                           and node['device'] == drive][0]
                     part, nodes = self.ring.get_nodes(piv_acc, piv_cont)
                     headers = {
                         'X-Backend-Pivot-Account': piv_acc,
@@ -368,7 +368,8 @@ class ContainerController(BaseStorageServer):
         requested_policy_index = self.get_and_validate_policy_index(req)
         broker = self._get_container_broker(drive, part, account, container)
         if obj:     # put container object
-            if len(broker.get_pivot_points()) > 0:
+            if os.path.exists(broker.db_file) and \
+                            len(broker.get_pivot_points()) > 0:
                 try:
                     # This is a sharded root container, so we need figure out
                     # where the obj should live and return a 301.
@@ -378,7 +379,7 @@ class ContainerController(BaseStorageServer):
                     l_ip, l_port = req.host.split(':')
                     idx = [i for i, node in enumerate(nodes)
                            if node['ip'] == l_ip and node['port'] == l_port
-                           and node['device'] == drive]
+                           and node['device'] == drive][0]
                     pivotTree = broker.build_pivot_tree()
                     node, weight = pivotTree.get(obj)
                     piv_acc, piv_cont = pivot_to_pivot_container(
