@@ -206,34 +206,17 @@ class ObjectUpdater(Daemon):
             # Sharded containers in swift means when we hit a root container
             # that has been sharded, we'll receive a 301 (permanently moved),
             # when we get one we get new orders (from the resp headers) to
-            # the nodes we really need to update.
-            # The problem is, in older versions of the updater we'd fire off
-            # all the updates at once. This is nice an efficient when you knew
-            # you were talking to the correct container. Now, if we get a 301
-            # we fire again (x replica count) at the next container.
-            # This will start somewhat of a request storm.
-            #
-            # So now, we'll fire off one request, if it's a 301 we can reroute,
-            # if it isn't then we can send of the rest of the requests all at
-            # once.
+            # the node we really need to update.
             shuffle(nodes)
-            event_success, node_id, redirect = self.object_update(
-                nodes[0], part, op, object, headers_out)
-            if redirect:
-                raise HTTPMovedPermanently(headers=dict(redirect.getheaders()))
-            results.append((event_success, node_id))
-
-            # In case the number of container replicas is 1.
-            if len(nodes) > 1:
-                events = [spawn(self.object_update,
-                                node, part, op, object, headers_out)
-                          for node in nodes[1:] if node['id'] not in successes]
-                for event in events:
-                    event_success, node_id, redirect = event.wait()
-                    if redirect:
-                        raise HTTPMovedPermanently(
-                            headers=dict(redirect.getheaders()))
-                    results.append((event_success, node_id))
+            events = [spawn(self.object_update,
+                            node, part, op, object, headers_out)
+                      for node in nodes if node['id'] not in successes]
+            for event in events:
+                event_success, node_id, redirect = event.wait()
+                if redirect:
+                    raise HTTPMovedPermanently(
+                        headers=dict(redirect.getheaders()))
+                results.append((event_success, node_id))
         except (HTTPMovedPermanently, HTTPException) as ex:
             piv_acc = ex.headers.get('X-Backend-Pivot-Account')
             piv_cont = ex.headers.get('X-Backend-Pivot-Container')

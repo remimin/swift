@@ -371,20 +371,25 @@ class ContainerController(BaseStorageServer):
                 try:
                     # This is a sharded root container, so we need figure out
                     # where the obj should live and return a 301.
+                    # We will send back the details of the primary node at the
+                    # same index of this one.
+                    nodes = self.ring.get_part_nodes(part)
+                    l_ip, l_port = req.host.split(':')
+                    idx = [i for i, node in enumerate(nodes)
+                           if node['ip'] == l_ip and  node['port'] == l_port
+                           and node['device'] == drive]
                     pivotTree = broker.build_pivot_tree()
                     node, weight = pivotTree.get(obj)
                     piv_acc, piv_cont = pivot_to_pivot_container(
                         account, container, node.key, weight)
 
                     part, nodes = self.ring.get_nodes(piv_acc, piv_cont)
-                    node_data = [('%s:%d' % (n['ip'], n['port']), n['device'])
-                                 for n in nodes]
-                    hosts, devices = zip(*node_data)
-                    headers = {'X-Backend-Pivot-Account': piv_acc,
-                               'X-Backend-Pivot-Container': piv_cont,
-                               'X-Container-Host': ','.join(hosts),
-                               'X-Container-Device': ','.join(devices),
-                               'X-Container-Partition': part}
+                    headers = {
+                        'X-Backend-Pivot-Account': piv_acc,
+                        'X-Backend-Pivot-Container': piv_cont,
+                        'X-Container-Host': "%(ip)s:%(port)d" % nodes[idx],
+                        'X-Container-Device': nodes[idx]['device'],
+                        'X-Container-Partition': part}
                     return HTTPMovedPermanently(headers=headers)
                 except:
                     return HTTPInternalServerError()
