@@ -276,11 +276,14 @@ class ContainerController(BaseStorageServer):
                     piv_acc, piv_cont = pivot_to_pivot_container(
                         account, container, node.key, weight)
 
-                    nodes = self.ring.get_part_nodes(part)
+                    part, nodes = self.ring.get_nodes(account, container)
                     l_ip, l_port = req.host.split(':')
-                    idx = [i for i, node in enumerate(nodes)
-                           if node['ip'] == l_ip and node['port'] == l_port
-                           and node['device'] == drive][0]
+                    idx = [node['index'] for node in nodes
+                           if node['ip'] == l_ip and node['port'] == int(l_port)
+                           and node['device'] == drive]
+                    if not idx:
+                        raise HTTPInternalServerError()
+                    idx = idx[0]
                     part, nodes = self.ring.get_nodes(piv_acc, piv_cont)
                     headers = {
                         'X-Backend-Pivot-Account': piv_acc,
@@ -289,7 +292,7 @@ class ContainerController(BaseStorageServer):
                         'X-Container-Device': nodes[idx]['device'],
                         'X-Container-Partition': part}
                     return HTTPMovedPermanently(headers=headers)
-                except:
+                except Exception:
                     return HTTPInternalServerError()
             broker.delete_object(obj, req.headers.get('x-timestamp'),
                                  obj_policy_index)
@@ -375,11 +378,14 @@ class ContainerController(BaseStorageServer):
                     # where the obj should live and return a 301.
                     # We will send back the details of the primary node at the
                     # same index of this one.
-                    nodes = self.ring.get_part_nodes(part)
+                    part, nodes = self.ring.get_nodes(account, container)
                     l_ip, l_port = req.host.split(':')
-                    idx = [i for i, node in enumerate(nodes)
-                           if node['ip'] == l_ip and node['port'] == l_port
-                           and node['device'] == drive][0]
+                    idx = [node['index'] for node in nodes
+                           if node['ip'] == l_ip and node['port'] == int(l_port)
+                           and node['device'] == drive]
+                    if not idx:
+                        raise HTTPInternalServerError()
+                    idx = idx[0]
                     pivotTree = broker.build_pivot_tree()
                     node, weight = pivotTree.get(obj)
                     piv_acc, piv_cont = pivot_to_pivot_container(
@@ -393,7 +399,7 @@ class ContainerController(BaseStorageServer):
                         'X-Container-Device': nodes[idx]['device'],
                         'X-Container-Partition': part}
                     return HTTPMovedPermanently(headers=headers)
-                except:
+                except Exception:
                     return HTTPInternalServerError()
             # obj put expects the policy_index header, default is for
             # legacy support during upgrade.

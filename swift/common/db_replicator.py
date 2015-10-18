@@ -452,7 +452,7 @@ class Replicator(Daemon):
                 return True
             # if the difference in rowids between the two differs by
             # more than 50%, rsync then do a remote merge.
-            if rinfo['max_row'] / float(info['max_row']) < 0.5:
+            if rinfo['max_row'] / float(info['max_row']) < 0.55:
                 self.stats['remote_merge'] += 1
                 self.logger.increment('remote_merges')
                 return self._rsync_db(broker, node, http, info['id'],
