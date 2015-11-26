@@ -172,22 +172,55 @@ class ContainerSharder(ContainerReplicator):
         return results
 
     def _get_pivot_tree(self, account, container, newest=False):
+        part, nodes = self.ring.get_nodes(account, container)
+        node = self.find_local_handoff_for_part(part)
+        hsh = hash_path(account, container)
+        db_dir = storage_directory(DATADIR, part, hsh)
+        db_path = os.path.join(self.root, node['device'], db_dir, hsh + '.db')
+        self.logger.info(_("BY RMM db path:%s"), db_path)
+
         path = self.swift.make_path(account, container) + \
             '?nodes=pivot&format=json'
         headers = dict()
         if newest:
             headers['X-Newest'] = 'true'
-        try:
-            resp = self.swift.make_request('GET', path, headers,
-                                           acceptable_statuses=(2,))
-        except internal_client.UnexpectedResponse as ex:
-            self.logger.error(_("Failed to get pivot points from %s/%s"),
-                              account, container)
+        self.logger.info(_('RMM path:%s'), path) 
+
+        pivot_points = None
+        if not os.path.exists(db_path):
+            _path = "/%s/%s" %(account, container)
+            for node in nodes:
+                 self.logger.info(_('RMM ip:%s, port:%s, device:%s, part:%s'),
+                                  node['ip'],  node['port'], node['device'], part)
+                 resp = self._send_request(node['ip'],  node['port'], node['device'],
+                                    part, 'GET', _path, headers, "nodes=pivot&format=json")
+                 if not is_success(resp.status):
+                     self.logger.info(_('RMM resp status %s'), resp.status)
+                     continue
+                 pivot_points = resp.read()
+                 self.logger.info(_('RMM resp %s'),pivot_points) 
+                 break
+        else:
+            try:
+                headers['HTTP_USER_AGENT'] = 'container-sharder' 
+                resp = self.swift.make_request('GET', path, headers,
+                                               acceptable_statuses=(2,))
+                pivot_points = resp.body
+            except internal_client.UnexpectedResponse as ex:
+                self.logger.error(_("Failed to get pivot points from %s/%s"),
+                                  account, container)
+                return None
+
+        if not pivot_points:
+            self.logger.error(_("RMM Failed to get pivot points from %s/%s"),
+                                account, container)
             return None
+        self.logger.info(_("BY RMM get nodes, account %s , container %s, reps: %s"),
+                           account, container, pivot_points)
 
         tree = PivotTree()
         try:
-            for pivot in json.loads(resp.body):
+            for pivot in json.loads(pivot_points):
                 tree.add(pivot['name'])
         except ValueError:
             # Failed to decode the json response
@@ -300,6 +333,7 @@ class ContainerSharder(ContainerReplicator):
         """
         acct, cont = pivot_to_pivot_container(account, container, pivot,
                                               weight)
+        self.logger.info(_('BY RMM  pivot_to_pivot_container %s/ %s'), acct, cont)
         try:
             broker = self._get_shard_broker(acct, cont, policy_index)
         except DeviceUnavailable as duex:
@@ -478,6 +512,7 @@ class ContainerSharder(ContainerReplicator):
                                root_container=None):
 
         self.logger.info(_('Auditing %s/%s'), broker.account, broker.container)
+        self.logger.info(_('BY RMM Auditing pivot %s'), pivot)
         continue_with_container = True
         if not root_account or not root_container:
             root_account, root_container = \
@@ -513,14 +548,18 @@ class ContainerSharder(ContainerReplicator):
                     weight = -1
                 else:
                     weight = 1
+                self.logger.info(_("BY RMM parent %s,  node.key %s, weight %s"), node.parent.key, node.key, weight)
                 parent = (node.parent.key, weight)
 
         if parent:
             # We need to check the pivot_nodes.
             acct, cont = pivot_to_pivot_container(root_account, root_container,
                                                   *parent)
+            self.logger.info(_("BY RMM acct %s, cont %s"), acct, cont)
+            self.logger.info(_("BY RMM get parent tree"))
             parent_tree = self._get_pivot_tree(acct, cont, newest=True)
             if parent_tree:
+                self.logger.info(_("BY RMM get parent tree ####"))
                 node = tree.get(pivot)
                 if node:
                     parent_ok = True
@@ -620,8 +659,12 @@ class ContainerSharder(ContainerReplicator):
             self.tree_cache = {}
             root_account, root_container = \
                 ContainerSharder.get_shard_root_path(broker)
+            self.logger.error(_('By RMM -- root_account %s, root_container %s'),
+                                root_account, root_container)
             pivot, weight = pivot_container_to_pivot(root_container,
                                                      broker.container)
+            self.logger.error(_('By RMM -- pivot %s, weight %s'),
+                                pivot, weight)
 
             # Before we do any heavy lifting, lets do an audit on the shard
             # container. We grab the root's view of the pivot_points and make
@@ -704,7 +747,7 @@ class ContainerSharder(ContainerReplicator):
         #return reported
 
     def _send_request(self, ip, port, contdevice, partition, op, path,
-                      headers_out={}):
+                      headers_out={}, query=None):
             if 'user-agent' not in headers_out:
                 headers_out['user-agent'] = 'container-sharder %s' % \
                                             os.getpid()
@@ -713,7 +756,7 @@ class ContainerSharder(ContainerReplicator):
             try:
                 with ConnectionTimeout(self.conn_timeout):
                         conn = http_connect(ip, port, contdevice, partition,
-                                            op, path, headers_out)
+                                            op, path, headers_out, query)
                 with Timeout(self.node_timeout):
                     response = conn.getresponse()
                     return response
@@ -904,7 +947,7 @@ class ContainerSharder(ContainerReplicator):
                 marker = ''
 
             try:
-                part, new_broker, node_id = \
+                npart, new_broker, node_id = \
                     self._get_and_fill_shard_broker(
                         pivot, weight, items, root_account, root_container,
                         policy_index)
@@ -923,7 +966,7 @@ class ContainerSharder(ContainerReplicator):
             self.logger.info(_('Replicating new shard container %s/%s'),
                              new_broker.account, new_broker.container)
             self.cpool.spawn(
-                self._replicate_object, part, new_broker.db_file, node_id)
+                self._replicate_object, npart, new_broker.db_file, node_id)
             any(self.cpool)
 
         # Make sure the new distributed node has been added, to do this we need
@@ -946,6 +989,8 @@ class ContainerSharder(ContainerReplicator):
         # Now replicate the container we are working on
         self.logger.info(_('Replicating container %s/%s'),
                              broker.account, broker.container)
+        self.logger.error(_('BY RMM container %s , part no %s, db_file %s',),
+                           broker.container, part, broker.db_file)
         self.cpool.spawn(
             self._replicate_object, part, broker.db_file, node_id)
         any(self.cpool)

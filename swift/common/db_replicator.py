@@ -492,7 +492,9 @@ class Replicator(Daemon):
             info = broker.get_replication_info()
             bpart = self.ring.get_part(
                 info['account'], info.get('container'))
-            if bpart != int(partition):
+            self.logger.error('BY RMM file %s should be in partion %s and acctual partion is %s'
+                              % (object_file, bpart, partition))
+            if int(bpart) != int(partition):
                 partition = bpart
                 # Important to set this false here since the later check only
                 # checks if it's on the proper device, not partition.

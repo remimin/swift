@@ -3903,8 +3903,14 @@ def pivot_to_pivot_container(account, container, pivot_point, weight):
         if not pivot_point and not weight:
             return account, container
         weight_to_str = {-1: '.le.', 0: '.le.', 1: '.gt.'}
-        acc = ".sharded_%s" % account
-        cont = "%s%s%s" % (container, weight_to_str[weight], pivot_point)
+        acc = ".sharded_%s" % account if ".sharded_" not in account else account
+        if '.le.' in container:
+            cont = container[:container.find('.le.')]
+        elif '.gt.' in container:
+            cont = container[:container.find('.gt.')]
+        else:
+            cont = container
+        cont = "%s%s%s" % (cont, weight_to_str[weight], pivot_point)
         return acc, cont
 
 

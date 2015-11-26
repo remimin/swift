@@ -559,10 +559,13 @@ class ContainerController(BaseStorageServer):
 
             if epiv and leaf.key == epiv.key and ew == leaf_weight:
                 end = True
+            self.logger.info(_('BY RMM broker.account %s broker.container %s, leaf.key %s, leaf_weight %s'),
+                               broker.account, broker.container, leaf.key, leaf_weight)
 
             piv_acct, piv_cont = pivot_to_pivot_container(
                 broker.account, broker.container, leaf.key, leaf_weight)
             path = '/%s/%s' % (piv_acct, piv_cont)
+            self.logger.info(_('BY RMM piv_acct/piv_cont %s'), path)
             if req.method == 'GET':
                 params.update({'format': 'json', 'limit': str(limit)})
             part, nodes = self.ring.get_nodes(piv_acct, piv_cont)
